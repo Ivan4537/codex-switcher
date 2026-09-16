@@ -5507,50 +5507,53 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 fn sync_active_with_disk(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
     let disk_auth = AccountStore::read_codex_auth()?;
     let disk_email = AccountStore::extract_email(&disk_auth);
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
 
-    // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，"按 disk 对齐 current" 等于
-    // 把 current 强拉回 anchor —— 破坏整个 anchor 设计的目的。直接拒绝。
-    // 用户想换 anchor 应该走 set_session_anchor，想离开 anchor 模式应该先取消 anchor。
-    if let Some(anchor_id) = store.session_anchor_id() {
-        if store.current.as_deref() != Some(anchor_id.as_str()) {
-            return Err(
-                "手机锚生效中：disk 是 anchor 的镜像，不能用它对齐 current。\
-                 想离开 anchor 模式请先在 anchor 账号上点 📱 按钮取消"
-                    .to_string(),
-            );
+        // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，"按 disk 对齐 current" 等于
+        // 把 current 强拉回 anchor —— 破坏整个 anchor 设计的目的。直接拒绝。
+        // 用户想换 anchor 应该走 set_session_anchor，想离开 anchor 模式应该先取消 anchor。
+        if let Some(anchor_id) = store.session_anchor_id() {
+            if store.current.as_deref() != Some(anchor_id.as_str()) {
+                return Err(
+                    "手机锚生效中：disk 是 anchor 的镜像，不能用它对齐 current。\
+                     想离开 anchor 模式请先在 anchor 账号上点 📱 按钮取消"
+                        .to_string(),
+                );
+            }
         }
+
+        // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
+        let matching_id = disk_email
+            .as_deref()
+            .and_then(|email| {
+                let email_lower = email.to_lowercase();
+                store
+                    .accounts
+                    .values()
+                    .find(|a| {
+                        AccountStore::extract_email(&a.auth_json)
+                            .map(|e| e.to_lowercase() == email_lower)
+                            .unwrap_or(false)
+                            || a.name.to_lowercase() == email_lower
+                    })
+                    .map(|a| a.id.clone())
+            })
+            .or_else(|| {
+                // fallback: account_id 匹配
+                store
+                    .accounts
+                    .values()
+                    .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
+                    .map(|a| a.id.clone())
+            })
+            .ok_or_else(|| "磁盘账号不在管理列表中，请先导入".to_string())?;
+
+        // 安全：只改指针，不覆盖 Token。避免封号 Token 污染好号。
+        store.current = Some(matching_id);
+        store.save()?;
+        // 必须在此作用域结束后再更新托盘；托盘更新会重新读取 store。
     }
-
-    // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
-    let matching_id = disk_email
-        .as_deref()
-        .and_then(|email| {
-            let email_lower = email.to_lowercase();
-            store
-                .accounts
-                .values()
-                .find(|a| {
-                    AccountStore::extract_email(&a.auth_json)
-                        .map(|e| e.to_lowercase() == email_lower)
-                        .unwrap_or(false)
-                        || a.name.to_lowercase() == email_lower
-                })
-                .map(|a| a.id.clone())
-        })
-        .or_else(|| {
-            // fallback: account_id 匹配
-            store
-                .accounts
-                .values()
-                .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
-                .map(|a| a.id.clone())
-        })
-        .ok_or_else(|| "磁盘账号不在管理列表中，请先导入".to_string())?;
-
-    // 安全：只改指针，不覆盖 Token。避免封号 Token 污染好号。
-    store.current = Some(matching_id);
-    store.save()?;
 
     crate::tray::update_tray_menu(&app);
     Ok(())

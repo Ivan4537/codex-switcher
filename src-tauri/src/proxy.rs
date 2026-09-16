@@ -514,20 +514,29 @@ pub fn start(
 /// 返回 (token, is_chatgpt_auth)
 async fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
     // 1) 从 store 取一小段快照，尽快释放锁
-    let (current_id, remote_mode, primary, fallback, secret) = {
+    let (current_id, remote_mode, primary, fallback, secret, current_is_relay) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let id = store.current.as_ref().ok_or("没有激活的账号")?.clone();
+        let id = store
+            .current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&store))
+            .ok_or("没有激活的账号")?;
+        let current_is_relay = store
+            .accounts
+            .get(&id)
+            .is_some_and(|account| account.is_relay());
         (
             id,
             store.settings.remote_mode.clone(),
             store.settings.remote_server_url.clone(),
             store.settings.remote_server_url_fallback.clone(),
             store.settings.remote_shared_secret.clone(),
+            current_is_relay,
         )
     };
 
     // 2) client 模式：优先命中本地短缓存；miss 时去 Server 拿新鲜 token
-    if remote_mode == "client" && !secret.is_empty() {
+    if remote_mode == "client" && !current_is_relay && !secret.is_empty() {
         if let Some((tok, is_chatgpt)) = remote_token_cache_get(&current_id) {
             return Ok((tok, is_chatgpt));
         }
@@ -597,7 +606,11 @@ async fn resolve_token_with_affinity(
 ) -> Result<(String, bool, Option<String>, bool), String> {
     let Some(sk) = session_key else {
         let (tok, is_cgpt) = get_current_token(state).await?;
-        let cur = state.store.lock().ok().and_then(|s| s.current.clone());
+        let cur = state.store.lock().ok().and_then(|s| {
+            s.current
+                .clone()
+                .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+        });
         return Ok((tok, is_cgpt, cur, false));
     };
 
@@ -726,7 +739,11 @@ async fn resolve_token_with_affinity(
     }
 
     let (tok, is_cgpt) = get_current_token(state).await?;
-    let cur = state.store.lock().ok().and_then(|s| s.current.clone());
+    let cur = state.store.lock().ok().and_then(|s| {
+        s.current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+    });
     Ok((tok, is_cgpt, cur, false))
 }
 
@@ -1899,7 +1916,10 @@ async fn handle_named_relay_response(
 /// 取 store.current 的 Relay 路由信息（仅 Relay 类型；其它 None）。
 fn current_relay_route(state: &ProxyState) -> Option<RelayRoute> {
     let store = state.store.lock().ok()?;
-    let id = store.current.clone()?;
+    let id = store
+        .current
+        .clone()
+        .or_else(|| crate::relay_catalog::relay_only_account_id(&store))?;
     let acc = store.accounts.get(&id)?;
     if !acc.is_relay() {
         return None;
@@ -6308,12 +6328,14 @@ async fn handle_websocket(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let relay_base_url = state
-        .store
-        .lock()
-        .ok()
-        .and_then(|s| s.current.clone())
-        .and_then(|id| account_relay_base_url(&state, &id));
+    let relay_account_id = state.store.lock().ok().and_then(|s| {
+        s.current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+    });
+    let relay_base_url = relay_account_id
+        .as_deref()
+        .and_then(|id| account_relay_base_url(&state, id));
     let (http_url, _upstream_host) = get_upstream(is_chatgpt, relay_base_url.as_deref(), &path);
 
     // http(s):// → ws(s)://

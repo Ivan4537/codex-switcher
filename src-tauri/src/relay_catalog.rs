@@ -262,6 +262,27 @@ fn eligible(a: &Account) -> bool {
             .is_some_and(|url| !url.is_empty())
 }
 
+/// Return the only native Responses relay when there is no official/OpenAI
+/// account to serve as `AccountStore.current`.
+///
+/// Native Responses relays normally stay out of `current` because they are
+/// selected independently per model. A relay-only installation still needs a
+/// safe default for clients that send a plain model id (or do not refresh the
+/// model catalog). Only an unambiguous single relay is eligible here; multiple
+/// relays must continue to use their explicit `relay-current:<model>` slugs.
+pub fn relay_only_account_id(store: &AccountStore) -> Option<String> {
+    if store.current.is_some() || store.accounts.values().any(Account::is_openai_account) {
+        return None;
+    }
+    let mut ids = store
+        .accounts
+        .values()
+        .filter(|account| eligible(account))
+        .map(|account| account.id.clone());
+    let id = ids.next()?;
+    ids.next().is_none().then_some(id)
+}
+
 pub fn resolve(store: &AccountStore, slug: &str) -> Option<Model> {
     let items = candidates(store);
     let upstream = if let Some(model) = slug.strip_prefix(CURRENT_PREFIX) {
@@ -997,6 +1018,43 @@ mod tests {
         );
         assert!(store.current.is_none());
         assert_eq!(store.settings.current_relay_accounts.get("k3"), Some(&a.id));
+    }
+
+    #[test]
+    fn relay_only_fallback_is_unambiguous_and_does_not_change_current() {
+        let mut store = AccountStore::default();
+        let account = store.add_relay_account(
+            "Responses".into(),
+            "https://relay.example/v1".into(),
+            "test-key".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("gpt-5.5".into()),
+            None,
+            None,
+        );
+        assert_eq!(relay_only_account_id(&store), Some(account.id.clone()));
+        assert!(store.current.is_none());
+
+        let second = store.add_relay_account(
+            "Responses 2".into(),
+            "https://relay-2.example/v1".into(),
+            "test-key-2".into(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("gpt-5.5".into()),
+            None,
+            None,
+        );
+        assert_ne!(account.id, second.id);
+        assert!(relay_only_account_id(&store).is_none());
+        assert!(store.current.is_none());
     }
     #[test]
     fn provider_metadata_does_not_inherit_gpt_identity_or_retirement() {
