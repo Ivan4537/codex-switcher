@@ -641,6 +641,12 @@ pub struct CachedQuota {
     pub plan_type: String,
     #[serde(default = "default_true")]
     pub is_valid_for_cli: bool,
+    /// ChatGPT credits.balance。None = 上游未返回，不能当作 0。
+    #[serde(default)]
+    pub credits_balance: Option<f64>,
+    /// 上游是否声明该账号存在额度字段/能力。
+    #[serde(default)]
+    pub has_credits: bool,
     /// 主动重置次数（rate_limit_reset_credits.available_count）。老数据无此字段
     #[serde(default)]
     pub reset_credits: Option<i32>,
@@ -651,6 +657,39 @@ pub struct CachedQuota {
     #[serde(default)]
     pub luna_reserve: Option<crate::usage::LunaReserveWindow>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl CachedQuota {
+    /// 与旧版 Server 同步时，旧 payload 没有 credits 字段；保留本机已有的
+    /// 最后一次明确查询结果，避免后台同步把余额降级成 unknown。明确返回
+    /// `Some(0)` 时不保留旧值。
+    pub fn preserve_credits_from(&mut self, previous: &CachedQuota) {
+        if self.credits_balance.is_none() {
+            self.credits_balance = previous.credits_balance;
+            self.has_credits = self.has_credits || previous.has_credits;
+        }
+    }
+
+    /// 只有明确拿到正数余额时，才把账号视为可用余额号。
+    pub fn has_spendable_credits(&self) -> bool {
+        self.credits_balance
+            .is_some_and(|balance| balance.is_finite() && balance > 0.0)
+    }
+
+    /// 套餐窗口仍可用；free/unknown 没有可靠周窗口时只看主窗口。
+    pub fn has_rate_limit_quota(&self) -> bool {
+        let plan = self.plan_type.to_lowercase();
+        let is_free = plan == "free" || plan == "unknown";
+        if is_free {
+            self.five_hour_left > 0.0
+        } else {
+            self.five_hour_left > 0.0 && self.weekly_left > 0.0
+        }
+    }
+
+    pub fn has_usable_quota(&self) -> bool {
+        self.has_rate_limit_quota() || self.has_spendable_credits()
+    }
 }
 
 fn default_five_hour_label() -> String {

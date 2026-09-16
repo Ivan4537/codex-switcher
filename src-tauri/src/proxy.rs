@@ -684,7 +684,7 @@ async fn resolve_token_with_affinity(
                     // 静默 mid-stream RST（不是干净 429），codex 看到 transport error
                     // 反复重连 5/5 仍失败。把这种"软失效"也从 affinity 候选剔除。
                     match a.cached_quota.as_ref() {
-                        Some(q) => q.five_hour_left > 0.0 && q.weekly_left > 0.0,
+                        Some(q) => q.has_usable_quota(),
                         None => true, // 没缓存就给个 benefit of doubt
                     }
                 })
@@ -6178,14 +6178,7 @@ async fn handle_websocket(
                         if a.is_banned || a.is_token_invalid || a.is_logged_out {
                             return Some(true);
                         }
-                        a.cached_quota.as_ref().map(|q| {
-                            let is_free = q.plan_type.to_lowercase() == "free";
-                            if is_free {
-                                q.five_hour_left <= 0.0
-                            } else {
-                                q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
-                            }
-                        })
+                        a.cached_quota.as_ref().map(|q| !q.has_usable_quota())
                     })
                     .unwrap_or(false)
             } else {
@@ -6268,6 +6261,8 @@ async fn handle_websocket(
                                                 weekly_label: usage.weekly_label.clone(),
                                                 plan_type: usage.plan_type.clone(),
                                                 is_valid_for_cli: usage.is_valid_for_cli,
+                                                credits_balance: usage.credits_balance,
+                                                has_credits: usage.has_credits,
                                                 reset_credits: usage.reset_credits,
                                                 spark: usage.spark.clone(),
                                                 luna_reserve: usage.luna_reserve.clone(),
@@ -6276,7 +6271,7 @@ async fn handle_websocket(
                                             let _ = store.save();
                                         }
                                     }
-                                    usage.five_hour_left > 0 && usage.weekly_left > 0
+                                    usage.has_usable_quota()
                                 }
                                 Err(e) => {
                                     println!("[Proxy] 预检查询候选号额度失败: {}", e);
@@ -7257,7 +7252,8 @@ async fn bridge_websockets<S1, S2>(
                             mark_current_luna_reserve_depleted(&state_clone);
                             mark_current_quota_depleted(&state_clone);
                             if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                                let _ = do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
+                                let _ =
+                                    do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
                             }
                             println!("[Proxy] WebSocket Luna Reserve 已耗尽，切号并关闭此 WS");
                         } else {

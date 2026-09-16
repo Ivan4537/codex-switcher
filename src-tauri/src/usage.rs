@@ -104,6 +104,29 @@ pub struct UsageDisplay {
     pub is_valid_for_cli: bool,
 }
 
+impl UsageDisplay {
+    /// 只有明确拿到正数余额时，才把账号视为可用余额号。
+    pub fn has_spendable_credits(&self) -> bool {
+        self.credits_balance
+            .is_some_and(|balance| balance.is_finite() && balance > 0.0)
+    }
+
+    /// 套餐窗口仍可用；free/unknown 没有可靠周窗口时只看主窗口。
+    pub fn has_rate_limit_quota(&self) -> bool {
+        let plan = self.plan_type.to_lowercase();
+        let is_free = plan == "free" || plan == "unknown";
+        if is_free {
+            self.five_hour_left > 0
+        } else {
+            self.five_hour_left > 0 && self.weekly_left > 0
+        }
+    }
+
+    pub fn has_usable_quota(&self) -> bool {
+        self.has_rate_limit_quota() || self.has_spendable_credits()
+    }
+}
+
 /// 用量获取器
 pub struct UsageFetcher;
 
@@ -1880,6 +1903,28 @@ mod tests {
         let reserve = usage.luna_reserve.unwrap();
         assert!(reserve.is_available_for("gpt-5.6-luna"));
         assert!(!reserve.is_available_for("gpt-5.5"));
+    }
+
+    #[test]
+    fn credits_balance_is_parsed_and_can_be_used_as_fallback() {
+        let body = json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {"used_percent": 100, "limit_window_seconds": 18000},
+                "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800}
+            },
+            "credits": {"has_credits": true, "balance": 1000}
+        });
+        let mut usage = UsageFetcher::parse_usage_response(&body).unwrap();
+        assert_eq!(usage.credits_balance, Some(1000.0));
+        assert!(usage.has_credits);
+        assert!(usage.has_spendable_credits());
+        assert!(usage.has_usable_quota());
+        assert!(!usage.has_rate_limit_quota());
+
+        usage.credits_balance = Some(0.0);
+        assert!(!usage.has_spendable_credits());
+        assert!(!usage.has_usable_quota());
     }
 
     #[test]

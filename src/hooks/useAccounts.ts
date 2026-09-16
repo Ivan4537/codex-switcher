@@ -14,6 +14,10 @@ export interface CachedQuota {
     weekly_label?: string;
     plan_type: string;
     is_valid_for_cli?: boolean;
+    /** ChatGPT credits.balance；undefined 表示旧缓存尚未查询该字段。 */
+    credits_balance?: number | null;
+    /** 上游是否返回 credits 能力/字段。 */
+    has_credits?: boolean;
     reset_credits?: number | null;
     spark?: SparkWindows | null;
     luna_reserve?: LunaReserveWindow | null;

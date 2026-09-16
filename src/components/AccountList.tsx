@@ -7,6 +7,7 @@ import { AntigravityQuota, type AntigravityModelQuota } from './AntigravityQuota
 import { AgyRelayModelQuotas, RelayQuotaWindows } from './RelayQuotaWindows';
 import { relayCurrentState } from '../utils/relayCurrent';
 import { ReferralInviteModal } from './ReferralInviteModal';
+import { referralProgramForPlan, type ReferralProgram } from './referral';
 
 const KIND_BADGE: Record<ReturnType<typeof effectiveKind>, { label: string; className: string }> = {
     chatgpt_oauth: { label: '订阅', className: 'badge kind-chatgpt' },
@@ -150,6 +151,8 @@ interface UsageData {
     weekly_label: string;
     plan_type: string;
     is_valid_for_cli: boolean;
+    credits_balance?: number | null;
+    has_credits?: boolean;
     reset_credits?: number | null;
     spark?: SparkWindows | null;
     luna_reserve?: LunaReserveWindow | null;
@@ -204,7 +207,7 @@ export function AccountList({
     const [cookieEditor, setCookieEditor] = useState<{ id: string; name: string; value: string } | null>(null);
     const [savingCookie, setSavingCookie] = useState(false);
     // Codex 邀请弹窗
-    const [inviteModal, setInviteModal] = useState<{ id: string; name: string } | null>(null);
+    const [inviteModal, setInviteModal] = useState<{ id: string; name: string; program: ReferralProgram } | null>(null);
     // Codex 启动：用该账号在隔离 CODEX_HOME 直连下开一个真 codex 终端
     const [launchingIds, setLaunchingIds] = useState<Set<string>>(new Set());
     // 主动重置：点徽章先弹窗列出所有重置次数（含到期时间），再消耗一次
@@ -369,7 +372,7 @@ export function AccountList({
         }
     };
 
-    const openInvite = (id: string, name: string) => setInviteModal({ id, name });
+    const openInvite = (id: string, name: string, program: ReferralProgram) => setInviteModal({ id, name, program });
 
     // 初始化数据
     useEffect(() => {
@@ -401,6 +404,8 @@ export function AccountList({
                     weekly_label: acc.cached_quota.weekly_label || '周限额',
                     plan_type: acc.cached_quota.plan_type,
                     is_valid_for_cli: isValid,
+                    credits_balance: acc.cached_quota.credits_balance,
+                    has_credits: acc.cached_quota.has_credits,
                     reset_credits: acc.cached_quota.reset_credits,
                     spark: acc.cached_quota.spark,
                     luna_reserve: acc.cached_quota.luna_reserve,
@@ -408,7 +413,25 @@ export function AccountList({
                 if (!isValid) initialInvalids.add(acc.id);
             }
         });
-        setUsageMap(prev => ({ ...prev, ...initialUsage }));
+        setUsageMap(prev => {
+            const next = { ...prev };
+            for (const [id, cached] of Object.entries(initialUsage)) {
+                const previous = next[id];
+                next[id] = {
+                    ...previous,
+                    ...cached,
+                    // 旧版 Server/缓存没有这两个字段，不要用 undefined 抹掉
+                    // 本机刚刚通过 /wham/usage 查到的余额。
+                    credits_balance: cached.credits_balance !== undefined
+                        ? cached.credits_balance
+                        : previous?.credits_balance,
+                    has_credits: cached.has_credits !== undefined
+                        ? cached.has_credits
+                        : previous?.has_credits,
+                };
+            }
+            return next;
+        });
         setRelayUsageMap(prev => ({ ...prev, ...initialRelayUsage }));
         setInvalidIds(initialInvalids);
         setBannedIds(initialBanned);
@@ -811,6 +834,25 @@ export function AccountList({
         );
     };
 
+    const CreditsQuotaItem = ({ balance, hasCredits }: { balance?: number | null; hasCredits?: boolean }) => {
+        const knownBalance = typeof balance === 'number' && Number.isFinite(balance);
+        const value = knownBalance
+            ? balance.toLocaleString(undefined, { maximumFractionDigits: 2 })
+            : hasCredits ? '未返回' : '未查询';
+        const tone = knownBalance ? (balance > 0 ? 'green' : 'red') : 'neutral';
+        return (
+            <div
+                className={`quota-mini-card credits ${tone}`}
+                aria-label={`额度余额 ${value}`}
+                title={knownBalance ? '来自 /wham/usage 的 credits.balance' : '请刷新该账号额度以查询 credits.balance'}
+            >
+                <div className="quota-mini-content">
+                    <span className={`quota-credits-value ${tone}`}>{value}</span>
+                </div>
+            </div>
+        );
+    };
+
     return (
         <div className="account-list-container">
             <div className="account-list-toolbar">
@@ -1058,6 +1100,13 @@ export function AccountList({
                                                     resetAt={usage.luna_reserve.reset_at ?? undefined}
                                                 />
                                             )}
+                                            {kind === 'chatgpt_oauth' && (
+                                                <CreditsQuotaItem balance={usage.credits_balance} hasCredits={usage.has_credits} />
+                                            )}
+                                        </div>
+                                    ) : kind === 'chatgpt_oauth' ? (
+                                        <div className="quota-grid">
+                                            <CreditsQuotaItem />
                                         </div>
                                     ) : <span className="quota-empty">未获取数据</span>}
                                 </div>
@@ -1144,7 +1193,12 @@ export function AccountList({
                                         </button>
                                     )}
                                     {effectiveKind(acc) === 'chatgpt_oauth' && (usage?.plan_type ?? '').toLowerCase() !== 'free' && (
-                                        <button className="action-btn invite" onClick={() => openInvite(acc.id, acc.name)} title="ChatGPT 桌面版邀请与奖励"><UserPlus size={14} /></button>
+                                        (() => {
+                                            const referralProgram = referralProgramForPlan(usage?.plan_type ?? acc.cached_quota?.plan_type);
+                                            return referralProgram ? (
+                                                <button className="action-btn invite" onClick={() => openInvite(acc.id, acc.name, referralProgram)} title={referralProgram === 'codex_referral_workspace' ? '邀请同事使用 ChatGPT 桌面版' : '邀请朋友使用 ChatGPT 桌面版'}><UserPlus size={14} /></button>
+                                            ) : null;
+                                        })()
                                     )}
                                     <button className="action-btn delete" onClick={() => setAccountToDelete({ id: acc.id, name: acc.name })} title="删除"><Trash2 size={14} /></button>
                                 </div>
@@ -1368,7 +1422,7 @@ export function AccountList({
                 </div>
             )}
 
-            {inviteModal && <ReferralInviteModal key={inviteModal.id} {...inviteModal} onClose={() => setInviteModal(null)} />}
+            {inviteModal && <ReferralInviteModal key={`${inviteModal.id}:${inviteModal.program}`} {...inviteModal} onClose={() => setInviteModal(null)} />}
         </div>
     );
 }
