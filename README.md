@@ -22,6 +22,13 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 
 当 Luna Reserve 仍可用时，使用 `gpt-5.6-luna` 不会因为普通额度耗尽而自动切换账号；Reserve 耗尽、过期或明确不可用后，系统才恢复正常的切号策略。
 
+## v0.7.16 更新说明
+
+- **Credits 余额显示**：ChatGPT 账号列表直接显示 `/wham/usage` 返回的 `credits.balance` 数字；明确为 0 和尚未查询分别显示，避免把未知状态误判成无余额。
+- **Credits 余额参与自动切号**：普通 5 小时/周额度耗尽后，明确还有正 Credits 余额的账号仍会作为候选，并在切换前重新确认可用性。
+- **邀请活动按套餐匹配**：Plus/Pro 使用个人邀请活动，Team/Business/Enterprise/Edu 使用工作区邀请活动；入口分别显示“邀请朋友”和“邀请同事”，减少因活动类型不匹配导致的 403。
+- **跨客户端缓存兼容**：旧版远端缓存缺少新余额字段时，client 模式会保留本机最后一次明确查询结果，不会被旧数据覆盖。
+
 ## v0.7.15 更新说明
 
 - 修复标题栏版本号写死为旧版本的问题。现在从 Tauri 运行时读取应用版本，发布新版本后 UI 会与安装包版本保持一致。
@@ -80,6 +87,7 @@ Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面
 - **会话级路由**：把单个 Codex 会话固定到 ChatGPT、GLM Coding Plan、MiMo 或其他 Relay，立即生效，无需重启客户端。
 - **无损自动切号**：统一处理额度耗尽、封禁、401、429、Token 失效、上下文超限和全局容量问题，并在 SSE/WS 错误到达客户端前完成重试。
 - **Desktop 身份隔离**：Codex Desktop 可继续使用 Team / Business 登录，代理请求独立使用当前账号的 Token 与 `chatgpt-account-id`，减少假 401 和错误切号。
+- **Credits 余额与邀请管理**：账号列表直接显示 ChatGPT Credits 余额，并区分 0 与未查询；邀请入口按 Plus/Pro 或 Team/Business/Enterprise/Edu 选择对应活动。
 - **统一账号池**：集中管理 ChatGPT OAuth、OpenAI API Key、第三方 Relay、Coding Plan 和远程账号池，并支持按类型、套餐和状态筛选。
 - **多协议与模型接入**：支持原生 Responses 转发，也支持转换为 Chat Completions，接入 GLM、Xiaomi MiMo、DeepSeek、Kimi、MiniMax、通义、火山、UCloud、OpenRouter 等服务。
 - **模型级 Relay 路由**：同一 Relay 账号池可按模型选择不同当前账号，支持 WebSocket 与流式 Responses 适配。
@@ -115,6 +123,7 @@ Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面
 - [界面预览](#界面预览)
 - [为什么需要它](#为什么需要它)
 - [工作方式](#工作方式)
+- [v0.7.16 更新说明](#v0716-更新说明)
 - [v0.7.14 更新说明](#v0714-更新说明)
 - [v0.7.13 更新说明](#v0713-更新说明)
 - [v0.7.12 更新说明](#v0712-更新说明)
@@ -497,7 +506,7 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | --- | --- |
 | 账号 | ChatGPT OAuth、OpenAI Key、Relay/API Key、批量导入导出、OTP 批量登录 |
 | 代理 | HTTP、WebSocket、SSE 检测、keep-alive、LAN/ZeroTier、本地端口代理 |
-| 自动切号 | 无损切号、自动重发请求、前端无感知、5h 阈值、周阈值、限额识别、封禁识别、401 静默刷新、全局容量处理 |
+| 自动切号 | 无损切号、自动重发请求、前端无感知、5h/周阈值、Credits 余额兜底、限额识别、封禁识别、401 静默刷新、全局容量处理 |
 | Relay | `/v1/responses` 转 `/chat/completions`、模型映射、fallback、provider preset、用量查询 |
 | GLM | GLM preset、GLM Coding Plan、GLM quota、reasoning_content 流式转换 |
 | MiMo | Xiaomi MiMo Token Plan、新加坡 Token Plan 端点、tp-key、Chat Completions 协议转换 |
@@ -515,7 +524,7 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | 页面 | 用途 |
 | --- | --- |
 | Dashboard | 当前账号、配额概览、快速切换、导出、IDE 同步冲突处理 |
-| Accounts | 账号列表、plan/Relay 筛选、单账号配额、keepalive、批量刷新 |
+| Accounts | 账号列表、plan/Relay 筛选、单账号配额与 Credits 余额、邀请活动、keepalive、批量刷新 |
 | Proxy | 本地代理状态、端口、LAN 暴露、请求/切号计数、自动切号策略 |
 | **路由 (v0.6.0)** | **会话级硬路由：把指定 codex session 钉到指定账号；一键绑定"当前活跃会话"；保存即生效，无需重启 codex** |
 | Stats | token、成本、模型分布、周期历史、切号原因、容量估算 |
