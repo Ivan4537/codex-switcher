@@ -1855,7 +1855,9 @@ async fn handle_named_relay_response(
     body: Bytes,
     slug: &str,
 ) -> Response<ProxyBody> {
-    if method != Method::POST || !path.split('?').next().unwrap_or("").ends_with("/responses") {
+    let path_only = path.split('?').next().unwrap_or("");
+    let is_compact = is_responses_compact_path(path);
+    if method != Method::POST || (!path_only.ends_with("/responses") && !is_compact) {
         return error_response(
             StatusCode::BAD_REQUEST,
             "Selected relay model requires the Responses API",
@@ -1879,12 +1881,15 @@ async fn handle_named_relay_response(
     };
     // Fresh headers: do not leak a ChatGPT bearer, account id, cookies or private
     // routing headers to a third-party API. Native Responses body/events pass through.
-    let response =
-        match crate::relay_catalog::forward_native(&state.client, &base, &key, &body, &model).await
-        {
-            Ok(response) => response,
-            Err(error) => return error_response(StatusCode::BAD_GATEWAY, &error),
-        };
+    let response = match if is_compact {
+        crate::relay_catalog::forward_native_compact(&state.client, &base, &key, &body, &model)
+            .await
+    } else {
+        crate::relay_catalog::forward_native(&state.client, &base, &key, &body, &model).await
+    } {
+        Ok(response) => response,
+        Err(error) => return error_response(StatusCode::BAD_GATEWAY, &error),
+    };
     if response.status().is_success() {
         if let Ok(mut store) = state.store.lock() {
             if let Some(account) = store.accounts.get_mut(&model.account_id) {
@@ -1894,6 +1899,13 @@ async fn handle_named_relay_response(
         }
     }
     build_stream_response(response, None, None)
+}
+
+fn is_responses_compact_path(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .unwrap_or("")
+        .ends_with("/responses/compact")
 }
 
 /// 取 store.current 的 Relay 路由信息（仅 Relay 类型；其它 None）。
@@ -3065,6 +3077,16 @@ async fn handle_request(
                     req.uri()
                 );
                 return handle_chat_completions_relay_websocket(state, relay, req).await;
+            }
+            if relay.protocol == "responses" {
+                // Most Responses relays expose HTTP/SSE only. Reuse the local
+                // Responses bridge instead of assuming the relay also accepts
+                // a native WebSocket handshake.
+                println!(
+                    "[Proxy] Responses Relay WS → local HTTP/SSE bridge: {}",
+                    req.uri()
+                );
+                return handle_model_routed_websocket(state, req).await;
             }
         }
         println!("[Proxy] WebSocket upgrade 请求: {}", req.uri());
@@ -7257,7 +7279,8 @@ async fn bridge_websockets<S1, S2>(
                             mark_current_luna_reserve_depleted(&state_clone);
                             mark_current_quota_depleted(&state_clone);
                             if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                                let _ = do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
+                                let _ =
+                                    do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
                             }
                             println!("[Proxy] WebSocket Luna Reserve 已耗尽，切号并关闭此 WS");
                         } else {
@@ -8144,6 +8167,10 @@ async fn handle_chat_completions_relay(
 ) -> Response<ProxyBody> {
     let path_lc = path_and_query.split('?').next().unwrap_or("").to_string();
 
+    if is_responses_compact_path(&path_lc) {
+        return relay_compaction_unavailable_response();
+    }
+
     // GET /v1/models → 本地合成最小响应，不打上游
     if method == hyper::Method::GET && (path_lc == "/v1/models" || path_lc.ends_with("/models")) {
         let default_model = relay
@@ -8526,6 +8553,21 @@ async fn handle_chat_completions_relay(
     )
 }
 
+fn relay_compaction_unavailable_response() -> Response<ProxyBody> {
+    let body = serde_json::json!({
+        "error": {
+            "type": "rate_limit_error",
+            "code": "compaction_not_supported",
+            "message": "This chat-completions Relay cannot provide Responses compaction; Codex may continue without this compaction attempt."
+        }
+    });
+    Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header("content-type", "application/json")
+        .body(full_body(Bytes::from(body.to_string())))
+        .unwrap_or_else(|_| error_response(StatusCode::TOO_MANY_REQUESTS, "compaction unavailable"))
+}
+
 fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
     let body = serde_json::json!({
         "error": {
@@ -8550,6 +8592,21 @@ fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_path_detection_ignores_query_parameters() {
+        assert!(is_responses_compact_path("/v1/responses/compact"));
+        assert!(is_responses_compact_path(
+            "/v1/responses/compact?model=gpt-5.5"
+        ));
+        assert!(!is_responses_compact_path("/v1/responses"));
+    }
+
+    #[test]
+    fn chat_relay_compaction_is_retryable_not_a_fake_completion() {
+        let response = relay_compaction_unavailable_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
 
     #[test]
     fn provider_ws_hint_supplies_omitted_model_without_overriding_explicit_model() {

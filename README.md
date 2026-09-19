@@ -22,6 +22,12 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 
 当 Luna Reserve 仍可用时，使用 `gpt-5.6-luna` 不会因为普通额度耗尽而自动切换账号；Reserve 耗尽、过期或明确不可用后，系统才恢复正常的切号策略。
 
+## v0.7.17 更新说明
+
+- 修复 native Responses Relay 的 `/responses/compact` 请求被过滤 compaction item 的问题。
+- chat-completions Relay 不再伪造普通完成响应来处理 compaction；改为返回可重试的受控错误。
+- Responses Relay 的 WebSocket 请求改走本地 HTTP/SSE 适配，兼容不提供原生 WebSocket 的中转。
+
 ## v0.7.15 更新说明
 
 - 修复标题栏版本号写死为旧版本的问题。现在从 Tauri 运行时读取应用版本，发布新版本后 UI 会与安装包版本保持一致。
