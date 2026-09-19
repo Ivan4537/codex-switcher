@@ -36,6 +36,8 @@ mod token_tracker;
 mod tray;
 mod tray_position;
 mod usage;
+#[cfg(windows)]
+mod windows_clipboard;
 
 use account::{Account, AccountStore};
 use chrono::Utc;
