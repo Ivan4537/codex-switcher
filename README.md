@@ -615,7 +615,8 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | 百度千帆 (ERNIE) | `qianfan.baidubce.com/v2` | 三方 | chat_completions | |
 | UCloud Modelverse | `deepseek.uk-tokyo.ucloud-global.com/v1` | Coding Plan | chat_completions | 多模型聚合，海外区 |
 | Fireworks AI | `api.fireworks.ai/inference/v1` | 三方 | chat_completions | 海外按量 / Fire Pass 订阅 |
-| 阶跃星辰 Stepfun | `api.stepfun.com/v1` | 三方 | chat_completions | |
+| 阶跃星辰 StepFun Step Plan | `api.stepfun.com/step_plan/v1` | Coding Plan | chat_completions | 直接读取原生 `step-*` 模型；Oasis-Token 查询 Credit 额度 |
+| 阶跃星辰 OpenAPI | `api.stepfun.com/v1` | 三方 | chat_completions | 普通按量 API，与 Step Plan 分开 |
 | OpenRouter | `openrouter.ai/api/v1` | 三方 | chat_completions | 500+ 模型聚合 |
 | 魔搭 ModelScope | `api-inference.modelscope.cn/v1` | 三方 | chat_completions | Qwen 系列为主 |
 | Ollama 本地推理 | `localhost:11434/v1` | 三方 | chat_completions | 本地推理，API Key 可填任意非空字符串 |
