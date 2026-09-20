@@ -371,6 +371,17 @@ pub fn request_body(raw: &[u8], model: &Model) -> Result<Vec<u8>, String> {
     request_body_with_compaction(raw, model, false)
 }
 
+fn request_contains_compaction_trigger(value: &Value) -> bool {
+    value
+        .get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
+        })
+}
+
 /// Build a native Responses payload, optionally preserving ChatGPT's private
 /// compaction items for the dedicated `/responses/compact` endpoint.
 fn request_body_with_compaction(
@@ -379,6 +390,11 @@ fn request_body_with_compaction(
     preserve_compaction: bool,
 ) -> Result<Vec<u8>, String> {
     let mut value: Value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
+    // Current Codex remote compaction v2 uses the normal `/responses` endpoint
+    // with a `compaction_trigger` input item. Preserve the complete opaque
+    // compaction round-trip for native Responses relays; older non-native
+    // requests still use the compatibility filter below.
+    let preserve_compaction = preserve_compaction || request_contains_compaction_trigger(&value);
     let requested_effort = value
         .pointer("/reasoning/effort")
         .or_else(|| value.get("reasoning_effort"))
@@ -698,6 +714,21 @@ mod tests {
         let result: Value = serde_json::from_slice(
             &request_body_with_compaction(&serde_json::to_vec(&payload).unwrap(), &model, true)
                 .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["input"], payload["input"]);
+    }
+
+    #[test]
+    fn responses_v2_compaction_trigger_is_preserved_on_normal_endpoint() {
+        let mut model = models(&store()).pop().unwrap();
+        model.upstream = "native-responses".into();
+        let payload = json!({"model":model.slug,"input":[
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+            {"type":"compaction_trigger"},
+        ]});
+        let result: Value = serde_json::from_slice(
+            &request_body(&serde_json::to_vec(&payload).unwrap(), &model).unwrap(),
         )
         .unwrap();
         assert_eq!(result["input"], payload["input"]);

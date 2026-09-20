@@ -3148,10 +3148,15 @@ async fn handle_request(
     }
 
     // ── Relay 路由前置处理 ──
-    // 1) 当 current 是 Relay 时，重写 body 里的 `model` 字段（codex 端发的 gpt-* → glm-*）
-    // 2) Relay 不能走 client→Server 转发：Server 不知道这账号，会一路 fall through 浪费时间
+    // 1) Hard route 优先覆盖 current；2) 当有效 Relay 存在时重写 body 里的
+    // `model` 字段（codex 端发的 gpt-* → 上游实际模型）；3) Relay 不能走
+    // client→Server 转发，必须在 token 解析前锁定它自己的 API key/base_url。
     let relay_route = current_relay_route(&state);
-    let body_bytes = if let Some(ref r) = relay_route {
+    let hard_route_relay: Option<RelayRoute> =
+        resolve_hard_route(&state, &body_bytes, &req_headers)
+            .and_then(|(_sk, aid)| relay_route_for_account(&state, &aid));
+    let effective_relay = hard_route_relay.as_ref().or(relay_route.as_ref());
+    let body_bytes = if let Some(r) = effective_relay {
         rewrite_model_in_body(
             &body_bytes,
             r.model_map.as_ref(),
@@ -3161,18 +3166,10 @@ async fn handle_request(
         body_bytes
     };
 
-    // ── Hard route 检查（HTTP 路径）──
-    // 如果该 session 有 enabled 路由 → 用绑定账号的 RelayRoute 覆盖 current。
-    // 注意：必须在 chat_completions 翻译分支之前，否则 current 是普通号会跳过翻译。
-    let hard_route_relay: Option<RelayRoute> =
-        resolve_hard_route(&state, &body_bytes, &req_headers)
-            .and_then(|(_sk, aid)| relay_route_for_account(&state, &aid));
-
     // ── chat_completions Relay 翻译分支 ──
     // Relay 上游只懂 /chat/completions（GLM Coding Plan / MiMo 等）→ 用 relay_translate 把
     // codex 的 /v1/responses 翻译成 chat 协议，调好上游再把响应（SSE 或 sync）反翻译回来。
     // 优先用 hard_route_relay（用户显式指定的路由）；否则用 current_relay_route。
-    let effective_relay = hard_route_relay.as_ref().or(relay_route.as_ref());
     if let Some(r) = effective_relay {
         if r.protocol == "chat_completions" {
             return Ok(handle_chat_completions_relay(
@@ -3211,7 +3208,7 @@ async fn handle_request(
     // 到下面的本地路径（resolve_token_with_affinity → forward_with_token）。
     // resolve_token_with_affinity 在 client 模式下会自动从 Server fetch_token，
     // 所以 token 中心化的语义保留。
-    if remote_mode == "client" && relay_route.is_none() && !client_direct_upstream {
+    if remote_mode == "client" && effective_relay.is_none() && !client_direct_upstream {
         // 先尝试 silent retry：peek 响应首 chunk，撞 usage_limit_reached 就切号重试，最多 3 次
         match forward_to_server_with_silent_retry(
             &state,
@@ -3283,12 +3280,37 @@ async fn handle_request(
         }
     }
 
-    // 1. 获取 token —— 优先按 session affinity 选号，其次落回 current
-    //    hard_routed=true 表示命中用户主动定义的 session_routes（严格模式：不要切号/refresh）
+    // 1. 获取认证信息：native Responses Relay 必须锁定 Relay 自己的 API key，
+    // 不能让本地 HTTP/SSE bridge 回落到官方 OAuth token。chat_completions Relay
+    // 已在上面的适配分支返回；其余请求才走账号池/affinity。
+    // hard_routed=true 表示命中用户主动定义的 session_routes（严格模式：不要切号/refresh）。
     let (token, is_chatgpt, used_account_id, hard_routed) =
-        match resolve_token_with_affinity(&state, session_key.as_deref()).await {
-            Ok(t) => t,
-            Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
+        if let Some(relay) = effective_relay.filter(|r| r.protocol == "responses") {
+            let token = relay
+                .api_key
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "Responses Relay 缺少 API key".to_string());
+            match token {
+                Ok(token) => {
+                    println!(
+                        "[Proxy] native Responses Relay → {} {} (account={})",
+                        method, path_and_query, relay.account_id
+                    );
+                    (
+                        token,
+                        false,
+                        Some(relay.account_id.clone()),
+                        hard_route_relay.is_some(),
+                    )
+                }
+                Err(error) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &error)),
+            }
+        } else {
+            match resolve_token_with_affinity(&state, session_key.as_deref()).await {
+                Ok(t) => t,
+                Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
+            }
         };
     let body_bytes = if is_chatgpt {
         normalize_chatgpt_responses_body(&body_bytes, &path_and_query, &req_headers)

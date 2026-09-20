@@ -22,6 +22,12 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 
 当 Luna Reserve 仍可用时，使用 `gpt-5.6-luna` 不会因为普通额度耗尽而自动切换账号；Reserve 耗尽、过期或明确不可用后，系统才恢复正常的切号策略。
 
+## v0.7.18 更新说明
+
+- 修复 Responses Relay 经过本地 WebSocket → HTTP/SSE bridge 后回落官方账号的问题。
+- 当前 Relay 和 hard route 会在 token 解析前固定使用 Relay 自身的 API Key、base URL 和模型映射。
+- `/v1/responses` 与 `/v1/responses/compact` 均保持同一 Relay 路由，不再误走官方账号或远程 Server。
+
 ## v0.7.17 更新说明
 
 - 修复 native Responses Relay 的 `/responses/compact` 请求被过滤 compaction item 的问题。
