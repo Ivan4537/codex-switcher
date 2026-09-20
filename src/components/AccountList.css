@@ -647,6 +647,37 @@
     opacity: 0.5;
 }
 
+.quota-mini-card.credits {
+    background: rgba(245, 158, 11, 0.055);
+    border-color: rgba(245, 158, 11, 0.22);
+}
+
+.quota-mini-card.credits .quota-label {
+    color: #d97706;
+}
+
+.quota-credits-value {
+    min-width: 32px;
+    overflow: hidden;
+    font-size: 10px;
+    font-weight: 700;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.quota-credits-value.green {
+    color: var(--success-color);
+}
+
+.quota-credits-value.red {
+    color: var(--danger-color);
+}
+
+.quota-credits-value.neutral {
+    color: var(--text-muted);
+}
+
 .quota-mini-bg {
     position: absolute;
     inset: 0;

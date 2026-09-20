@@ -1,0 +1,106 @@
+.referral-quota-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid rgba(139, 92, 246, 0.28);
+    border-radius: 9px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.09), rgba(59, 130, 246, 0.06));
+}
+
+.referral-quota-header,
+.referral-quota-stats,
+.referral-quota-breakdown,
+.referral-quota-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.referral-quota-header > div {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.referral-quota-header strong {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.referral-quota-header span,
+.referral-quota-label,
+.referral-quota-breakdown,
+.referral-quota-note,
+.referral-quota-muted {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.referral-quota-refresh,
+.referral-quota-retry {
+    flex: 0 0 auto;
+    padding: 3px 7px;
+    border: 1px solid var(--border-color);
+    border-radius: 5px;
+    background: transparent;
+    color: var(--primary-color);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.referral-quota-refresh:disabled {
+    cursor: wait;
+    opacity: 0.65;
+}
+
+.referral-quota-stats {
+    align-items: flex-end;
+}
+
+.referral-quota-stats > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.referral-quota-stats strong {
+    color: var(--text-primary);
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.referral-quota-remaining {
+    align-items: flex-end;
+}
+
+.referral-quota-remaining strong {
+    color: var(--success-color);
+}
+
+.referral-quota-breakdown {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+}
+
+.referral-quota-note {
+    margin: 0;
+    line-height: 1.45;
+}
+
+.referral-quota-muted {
+    margin: 0;
+}
+
+.referral-quota-error {
+    align-items: flex-start;
+    color: var(--danger-color);
+    font-size: 11px;
+    line-height: 1.45;
+}

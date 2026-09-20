@@ -514,20 +514,29 @@ pub fn start(
 /// 返回 (token, is_chatgpt_auth)
 async fn get_current_token(state: &ProxyState) -> Result<(String, bool), String> {
     // 1) 从 store 取一小段快照，尽快释放锁
-    let (current_id, remote_mode, primary, fallback, secret) = {
+    let (current_id, remote_mode, primary, fallback, secret, current_is_relay) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        let id = store.current.as_ref().ok_or("没有激活的账号")?.clone();
+        let id = store
+            .current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&store))
+            .ok_or("没有激活的账号")?;
+        let current_is_relay = store
+            .accounts
+            .get(&id)
+            .is_some_and(|account| account.is_relay());
         (
             id,
             store.settings.remote_mode.clone(),
             store.settings.remote_server_url.clone(),
             store.settings.remote_server_url_fallback.clone(),
             store.settings.remote_shared_secret.clone(),
+            current_is_relay,
         )
     };
 
     // 2) client 模式：优先命中本地短缓存；miss 时去 Server 拿新鲜 token
-    if remote_mode == "client" && !secret.is_empty() {
+    if remote_mode == "client" && !current_is_relay && !secret.is_empty() {
         if let Some((tok, is_chatgpt)) = remote_token_cache_get(&current_id) {
             return Ok((tok, is_chatgpt));
         }
@@ -597,7 +606,11 @@ async fn resolve_token_with_affinity(
 ) -> Result<(String, bool, Option<String>, bool), String> {
     let Some(sk) = session_key else {
         let (tok, is_cgpt) = get_current_token(state).await?;
-        let cur = state.store.lock().ok().and_then(|s| s.current.clone());
+        let cur = state.store.lock().ok().and_then(|s| {
+            s.current
+                .clone()
+                .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+        });
         return Ok((tok, is_cgpt, cur, false));
     };
 
@@ -684,7 +697,7 @@ async fn resolve_token_with_affinity(
                     // 静默 mid-stream RST（不是干净 429），codex 看到 transport error
                     // 反复重连 5/5 仍失败。把这种"软失效"也从 affinity 候选剔除。
                     match a.cached_quota.as_ref() {
-                        Some(q) => q.five_hour_left > 0.0 && q.weekly_left > 0.0,
+                        Some(q) => q.has_usable_quota(),
                         None => true, // 没缓存就给个 benefit of doubt
                     }
                 })
@@ -726,7 +739,11 @@ async fn resolve_token_with_affinity(
     }
 
     let (tok, is_cgpt) = get_current_token(state).await?;
-    let cur = state.store.lock().ok().and_then(|s| s.current.clone());
+    let cur = state.store.lock().ok().and_then(|s| {
+        s.current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+    });
     Ok((tok, is_cgpt, cur, false))
 }
 
@@ -1852,6 +1869,7 @@ async fn handle_named_relay_response(
     state: Arc<ProxyState>,
     method: Method,
     path: &str,
+    req_headers: hyper::HeaderMap,
     body: Bytes,
     slug: &str,
 ) -> Response<ProxyBody> {
@@ -1870,15 +1888,61 @@ async fn handle_named_relay_response(
             model,
             account.relay_base_url.clone()?,
             AccountStore::extract_access_token(&account.auth_json)?,
+            account.relay_protocol_or_default().to_string(),
         ))
     });
-    let Some((model, base, key)) = target else {
+    let Some((model, base, key, protocol)) = target else {
         // Never silently send a removed/disabled relay model to the ChatGPT account.
         return error_response(
             StatusCode::BAD_REQUEST,
             "Selected relay model is unavailable; check its account, API key and protocol",
         );
     };
+    if protocol == "chat_completions" {
+        if method != Method::POST || (!path.split('?').next().unwrap_or("").ends_with("/responses") && !is_compact) {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Selected chat relay model requires the Responses API",
+            );
+        }
+        let mut value: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("model".to_string(), serde_json::json!(model.upstream));
+        }
+        let body = match serde_json::to_vec(&value) {
+            Ok(body) => Bytes::from(body),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
+        let Some(relay) = relay_route_for_account(&state, &model.account_id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Selected chat relay account unavailable",
+            );
+        };
+        // body_for_routing 已经按原始 Content-Encoding 解压过；不要让下游
+        // Chat Completions 翻译器看到 zstd/gzip 头后再次解压同一份 JSON。
+        let mut relay_headers = req_headers;
+        relay_headers.remove(hyper::header::CONTENT_ENCODING);
+        relay_headers.remove(hyper::header::CONTENT_LENGTH);
+        return handle_chat_completions_relay(
+            state,
+            relay,
+            method,
+            path.to_string(),
+            relay_headers,
+            body,
+        )
+        .await;
+    }
+    if method != Method::POST || !path.split('?').next().unwrap_or("").ends_with("/responses") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Selected relay model requires the Responses API",
+        );
+    }
     // Fresh headers: do not leak a ChatGPT bearer, account id, cookies or private
     // routing headers to a third-party API. Native Responses body/events pass through.
     let response = match if is_compact {
@@ -1911,7 +1975,10 @@ fn is_responses_compact_path(path: &str) -> bool {
 /// 取 store.current 的 Relay 路由信息（仅 Relay 类型；其它 None）。
 fn current_relay_route(state: &ProxyState) -> Option<RelayRoute> {
     let store = state.store.lock().ok()?;
-    let id = store.current.clone()?;
+    let id = store
+        .current
+        .clone()
+        .or_else(|| crate::relay_catalog::relay_only_account_id(&store))?;
     let acc = store.accounts.get(&id)?;
     if !acc.is_relay() {
         return None;
@@ -3121,6 +3188,7 @@ async fn handle_request(
                 state,
                 method,
                 &path_and_query,
+                req_headers,
                 body_for_routing,
                 &model,
             )
@@ -6222,14 +6290,7 @@ async fn handle_websocket(
                         if a.is_banned || a.is_token_invalid || a.is_logged_out {
                             return Some(true);
                         }
-                        a.cached_quota.as_ref().map(|q| {
-                            let is_free = q.plan_type.to_lowercase() == "free";
-                            if is_free {
-                                q.five_hour_left <= 0.0
-                            } else {
-                                q.five_hour_left <= 0.0 || q.weekly_left <= 0.0
-                            }
-                        })
+                        a.cached_quota.as_ref().map(|q| !q.has_usable_quota())
                     })
                     .unwrap_or(false)
             } else {
@@ -6312,6 +6373,8 @@ async fn handle_websocket(
                                                 weekly_label: usage.weekly_label.clone(),
                                                 plan_type: usage.plan_type.clone(),
                                                 is_valid_for_cli: usage.is_valid_for_cli,
+                                                credits_balance: usage.credits_balance,
+                                                has_credits: usage.has_credits,
                                                 reset_credits: usage.reset_credits,
                                                 spark: usage.spark.clone(),
                                                 luna_reserve: usage.luna_reserve.clone(),
@@ -6320,7 +6383,7 @@ async fn handle_websocket(
                                             let _ = store.save();
                                         }
                                     }
-                                    usage.five_hour_left > 0 && usage.weekly_left > 0
+                                    usage.has_usable_quota()
                                 }
                                 Err(e) => {
                                     println!("[Proxy] 预检查询候选号额度失败: {}", e);
@@ -6357,12 +6420,14 @@ async fn handle_websocket(
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let relay_base_url = state
-        .store
-        .lock()
-        .ok()
-        .and_then(|s| s.current.clone())
-        .and_then(|id| account_relay_base_url(&state, &id));
+    let relay_account_id = state.store.lock().ok().and_then(|s| {
+        s.current
+            .clone()
+            .or_else(|| crate::relay_catalog::relay_only_account_id(&s))
+    });
+    let relay_base_url = relay_account_id
+        .as_deref()
+        .and_then(|id| account_relay_base_url(&state, id));
     let (http_url, _upstream_host) = get_upstream(is_chatgpt, relay_base_url.as_deref(), &path);
 
     // http(s):// → ws(s)://
@@ -7709,6 +7774,15 @@ fn build_chat_completions_url(base_url: &str) -> Option<(String, String)> {
     Some((format!("{}/chat/completions", trimmed), host))
 }
 
+fn is_stepfun_plan_base_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url.trim_end_matches('/')) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("api.stepfun.com")
+        && url.path().trim_end_matches('/') == "/step_plan/v1"
+}
+
 /// 把厂商自家 chat_completions 错误体翻译成 codex 能识别的标准 OpenAI 错误。
 ///
 /// codex CLI 收到 `/v1/responses` 4xx 时按 OpenAI 错误格式 `{error:{code,message,type}}`
@@ -8193,8 +8267,53 @@ async fn handle_chat_completions_relay(
         return relay_compaction_unavailable_response();
     }
 
-    // GET /v1/models → 本地合成最小响应，不打上游
+    // Step Plan 有官方 OpenAI-compatible /models；直接返回它的原生 step-* 列表，
+    // 不把 gpt-* 别名映射成固定模型。其它 chat relay 仍保留本地最小兜底。
     if method == hyper::Method::GET && (path_lc == "/v1/models" || path_lc.ends_with("/models")) {
+        if is_stepfun_plan_base_url(relay.base_url.as_deref().unwrap_or("")) {
+            let base = relay
+                .base_url
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let upstream_url = format!("{}/models", base);
+            let host = match url::Url::parse(base)
+                .ok()
+                .and_then(|url| url.host_str().map(String::from))
+            {
+                Some(host) => host,
+                None => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "StepFun base_url 无法解析 host",
+                    )
+                }
+            };
+            let mut headers = build_chat_relay_upstream_headers(&host);
+            let api_key = relay.api_key.clone().unwrap_or_default();
+            if !api_key.is_empty() {
+                if let Ok(value) =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
+                {
+                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                }
+            }
+            match state
+                .client
+                .get(&upstream_url)
+                .headers(headers)
+                .send()
+                .await
+            {
+                Ok(response) => return build_stream_response(response, None, None),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("StepFun /models 请求失败: {}", error),
+                    )
+                }
+            }
+        }
         let default_model = relay
             .model_fallback
             .clone()

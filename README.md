@@ -8,6 +8,12 @@
 
 **中文** | [English](#english) | [Русский](#русский)
 
+> **v0.7.19 新增：阶跃星辰 StepFun Step Plan 支持。**
+>
+> 在「添加中转 → CODING PLAN → 阶跃星辰 Step Plan」中填入 Step API Key，即可接入 `https://api.stepfun.com/step_plan/v1`。Switcher 会直接读取官方 `/models` 返回的原生 `step-*` 模型，模型列表中可直接选择，不需要 GPT 别名映射。
+>
+> Step Plan 的额度查询可选填 `platform.stepfun.com` 的 `Oasis-Token`；它只用于读取订阅 Credit / 加油包额度，不参与模型请求。Step Plan 使用 Chat Completions 协议，Switcher 会自动转换 Codex Responses 请求。
+
 > **Luna Reserve 备用额度现已支持。** 当账号的常规高级模型额度暂时耗尽时，Switcher 会识别该账号可用的 Luna Reserve，并让 `gpt-5.6-luna` 继续使用这部分独立额度，避免因误判常规额度耗尽而提前切换账号。
 
 ### Luna Reserve 是什么
@@ -33,6 +39,18 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 - 修复 native Responses Relay 的 `/responses/compact` 请求被过滤 compaction item 的问题。
 - chat-completions Relay 不再伪造普通完成响应来处理 compaction；改为返回可重试的受控错误。
 - Responses Relay 的 WebSocket 请求改走本地 HTTP/SSE 适配，兼容不提供原生 WebSocket 的中转。
+
+## v0.7.19 更新说明
+
+- **阶跃星辰 StepFun Step Plan**：接入 Step Plan Chat Completions，直接读取官方原生模型目录并在 Codex 模型选择器中展示；接入订阅 Credit、加油包和 5H/7D 额度查询。
+- **协议兼容修复**：修复 Chat Completions Relay 的 zstd 请求体重复解压，以及 function tool 缺少合法 `parameters` 导致 StepFun `input_invalid` 的问题。
+
+## v0.7.16 更新说明
+
+- **Credits 余额显示**：ChatGPT 账号列表直接显示 `/wham/usage` 返回的 `credits.balance` 数字；明确为 0 和尚未查询分别显示，避免把未知状态误判成无余额。
+- **Credits 余额参与自动切号**：普通 5 小时/周额度耗尽后，明确还有正 Credits 余额的账号仍会作为候选，并在切换前重新确认可用性。
+- **邀请活动按套餐匹配**：Plus/Pro 使用个人邀请活动，Team/Business/Enterprise/Edu 使用工作区邀请活动；入口分别显示“邀请朋友”和“邀请同事”，减少因活动类型不匹配导致的 403。
+- **跨客户端缓存兼容**：旧版远端缓存缺少新余额字段时，client 模式会保留本机最后一次明确查询结果，不会被旧数据覆盖。
 
 ## v0.7.15 更新说明
 
@@ -76,7 +94,7 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 
 Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面工具。它把账号管理、配额观察、本地代理、无损自动切号、中转站、Coding Plan 接入、远程账号池和 Skills 管理放在同一个 Tauri 应用里，适合长期使用 Codex CLI、Codex App，以及支持 Codex 插件的 VS Code 及其衍生 IDE 的多账号环境。
 
-**一句话：当前账号限额了，前端任务不用停，Codex Switcher 在代理层自动换号、切换中转站或接入 Coding Plan，并自动重发请求。Coding Plan 目前已支持 GLM 和 Xiaomi MiMo Token Plan，其他平台待实测。**
+**一句话：当前账号限额了，前端任务不用停，Codex Switcher 在代理层自动换号、切换中转站或接入 Coding Plan，并自动重发请求。Coding Plan 目前支持 GLM、Xiaomi MiMo Token Plan 和阶跃星辰 StepFun Step Plan。**
 
 [下载最新版](https://github.com/xtftbwvfp/codex-switcher/releases/latest) · [配合 glance 使用](https://github.com/xtftbwvfp/glance)
 
@@ -92,8 +110,10 @@ Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面
 - **会话级路由**：把单个 Codex 会话固定到 ChatGPT、GLM Coding Plan、MiMo 或其他 Relay，立即生效，无需重启客户端。
 - **无损自动切号**：统一处理额度耗尽、封禁、401、429、Token 失效、上下文超限和全局容量问题，并在 SSE/WS 错误到达客户端前完成重试。
 - **Desktop 身份隔离**：Codex Desktop 可继续使用 Team / Business 登录，代理请求独立使用当前账号的 Token 与 `chatgpt-account-id`，减少假 401 和错误切号。
+- **Credits 余额与邀请管理**：账号列表直接显示 ChatGPT Credits 余额，并区分 0 与未查询；邀请入口按 Plus/Pro 或 Team/Business/Enterprise/Edu 选择对应活动。
 - **统一账号池**：集中管理 ChatGPT OAuth、OpenAI API Key、第三方 Relay、Coding Plan 和远程账号池，并支持按类型、套餐和状态筛选。
 - **多协议与模型接入**：支持原生 Responses 转发，也支持转换为 Chat Completions，接入 GLM、Xiaomi MiMo、DeepSeek、Kimi、MiniMax、通义、火山、UCloud、OpenRouter 等服务。
+- **StepFun Step Plan**：直接读取官方 `step-*` 模型列表，支持 Step API Key、Step Plan 原生模型选择和控制台 Credit 额度查询。
 - **模型级 Relay 路由**：同一 Relay 账号池可按模型选择不同当前账号，支持 WebSocket 与流式 Responses 适配。
 - **主动额度管理**：独立展示 5H/周额度、Spark、Luna Reserve、重置次数和周期状态，并按接口真实窗口识别 5H/7D。
 - **稳定的长任务代理**：提供 SSE bootstrap、流中错误检测、30 秒 keep-alive、WebSocket 双向桥接、session affinity 与 prompt cache 隔离。
@@ -127,6 +147,7 @@ Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面
 - [界面预览](#界面预览)
 - [为什么需要它](#为什么需要它)
 - [工作方式](#工作方式)
+- [v0.7.16 更新说明](#v0716-更新说明)
 - [v0.7.14 更新说明](#v0714-更新说明)
 - [v0.7.13 更新说明](#v0713-更新说明)
 - [v0.7.12 更新说明](#v0712-更新说明)
@@ -509,7 +530,7 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | --- | --- |
 | 账号 | ChatGPT OAuth、OpenAI Key、Relay/API Key、批量导入导出、OTP 批量登录 |
 | 代理 | HTTP、WebSocket、SSE 检测、keep-alive、LAN/ZeroTier、本地端口代理 |
-| 自动切号 | 无损切号、自动重发请求、前端无感知、5h 阈值、周阈值、限额识别、封禁识别、401 静默刷新、全局容量处理 |
+| 自动切号 | 无损切号、自动重发请求、前端无感知、5h/周阈值、Credits 余额兜底、限额识别、封禁识别、401 静默刷新、全局容量处理 |
 | Relay | `/v1/responses` 转 `/chat/completions`、模型映射、fallback、provider preset、用量查询 |
 | GLM | GLM preset、GLM Coding Plan、GLM quota、reasoning_content 流式转换 |
 | MiMo | Xiaomi MiMo Token Plan、新加坡 Token Plan 端点、tp-key、Chat Completions 协议转换 |
@@ -527,7 +548,7 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | 页面 | 用途 |
 | --- | --- |
 | Dashboard | 当前账号、配额概览、快速切换、导出、IDE 同步冲突处理 |
-| Accounts | 账号列表、plan/Relay 筛选、单账号配额、keepalive、批量刷新 |
+| Accounts | 账号列表、plan/Relay 筛选、单账号配额与 Credits 余额、邀请活动、keepalive、批量刷新 |
 | Proxy | 本地代理状态、端口、LAN 暴露、请求/切号计数、自动切号策略 |
 | **路由 (v0.6.0)** | **会话级硬路由：把指定 codex session 钉到指定账号；一键绑定"当前活跃会话"；保存即生效，无需重启 codex** |
 | Stats | token、成本、模型分布、周期历史、切号原因、容量估算 |
@@ -606,7 +627,8 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 | 百度千帆 (ERNIE) | `qianfan.baidubce.com/v2` | 三方 | chat_completions | |
 | UCloud Modelverse | `deepseek.uk-tokyo.ucloud-global.com/v1` | Coding Plan | chat_completions | 多模型聚合，海外区 |
 | Fireworks AI | `api.fireworks.ai/inference/v1` | 三方 | chat_completions | 海外按量 / Fire Pass 订阅 |
-| 阶跃星辰 Stepfun | `api.stepfun.com/v1` | 三方 | chat_completions | |
+| 阶跃星辰 StepFun Step Plan | `api.stepfun.com/step_plan/v1` | Coding Plan | chat_completions | 直接读取原生 `step-*` 模型；Oasis-Token 查询 Credit 额度 |
+| 阶跃星辰 OpenAPI | `api.stepfun.com/v1` | 三方 | chat_completions | 普通按量 API，与 Step Plan 分开 |
 | OpenRouter | `openrouter.ai/api/v1` | 三方 | chat_completions | 500+ 模型聚合 |
 | 魔搭 ModelScope | `api-inference.modelscope.cn/v1` | 三方 | chat_completions | Qwen 系列为主 |
 | Ollama 本地推理 | `localhost:11434/v1` | 三方 | chat_completions | 本地推理，API Key 可填任意非空字符串 |

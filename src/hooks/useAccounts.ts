@@ -14,6 +14,10 @@ export interface CachedQuota {
     weekly_label?: string;
     plan_type: string;
     is_valid_for_cli?: boolean;
+    /** ChatGPT credits.balance；undefined 表示旧缓存尚未查询该字段。 */
+    credits_balance?: number | null;
+    /** 上游是否返回 credits 能力/字段。 */
+    has_credits?: boolean;
     reset_credits?: number | null;
     spark?: SparkWindows | null;
     luna_reserve?: LunaReserveWindow | null;
@@ -113,6 +117,7 @@ export interface Account {
     relay_usage_cookie?: string | null;
     relay_usage_cache?: RelayUsageCache | null;
     relay_model_map?: Record<string, string> | null;
+    relay_model_catalog?: string[];
     relay_model_fallback?: string | null;
     relay_protocol?: string | null;
     /** 业务分类：aggregator (中转) / coding_plan / third_party (API) */

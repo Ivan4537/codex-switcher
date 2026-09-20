@@ -7,7 +7,9 @@ import { isMacOS } from '../platform';
 import { AntigravityQuota, type AntigravityModelQuota } from './AntigravityQuota';
 import { AgyRelayModelQuotas, RelayQuotaWindows } from './RelayQuotaWindows';
 import { relayCurrentState } from '../utils/relayCurrent';
+import { formatPlanLabel } from '../utils/planLabel';
 import { ReferralInviteModal } from './ReferralInviteModal';
+import { referralProgramForPlan, type ReferralProgram } from './referral';
 
 const KIND_BADGE: Record<ReturnType<typeof effectiveKind>, { label: string; className: string }> = {
     chatgpt_oauth: { label: '订阅', className: 'badge kind-chatgpt' },
@@ -151,6 +153,8 @@ interface UsageData {
     weekly_label: string;
     plan_type: string;
     is_valid_for_cli: boolean;
+    credits_balance?: number | null;
+    has_credits?: boolean;
     reset_credits?: number | null;
     spark?: SparkWindows | null;
     luna_reserve?: LunaReserveWindow | null;
@@ -205,7 +209,7 @@ export function AccountList({
     const [cookieEditor, setCookieEditor] = useState<{ id: string; name: string; value: string } | null>(null);
     const [savingCookie, setSavingCookie] = useState(false);
     // Codex 邀请弹窗
-    const [inviteModal, setInviteModal] = useState<{ id: string; name: string } | null>(null);
+    const [inviteModal, setInviteModal] = useState<{ id: string; name: string; program: ReferralProgram } | null>(null);
     // Codex 启动：用该账号在隔离 CODEX_HOME 直连下开一个真 codex 终端
     const [launchingIds, setLaunchingIds] = useState<Set<string>>(new Set());
     // 主动重置：点徽章先弹窗列出所有重置次数（含到期时间），再消耗一次
@@ -370,7 +374,7 @@ export function AccountList({
         }
     };
 
-    const openInvite = (id: string, name: string) => setInviteModal({ id, name });
+    const openInvite = (id: string, name: string, program: ReferralProgram) => setInviteModal({ id, name, program });
 
     // 初始化数据
     useEffect(() => {
@@ -402,6 +406,8 @@ export function AccountList({
                     weekly_label: acc.cached_quota.weekly_label || '周限额',
                     plan_type: acc.cached_quota.plan_type,
                     is_valid_for_cli: isValid,
+                    credits_balance: acc.cached_quota.credits_balance,
+                    has_credits: acc.cached_quota.has_credits,
                     reset_credits: acc.cached_quota.reset_credits,
                     spark: acc.cached_quota.spark,
                     luna_reserve: acc.cached_quota.luna_reserve,
@@ -409,7 +415,25 @@ export function AccountList({
                 if (!isValid) initialInvalids.add(acc.id);
             }
         });
-        setUsageMap(prev => ({ ...prev, ...initialUsage }));
+        setUsageMap(prev => {
+            const next = { ...prev };
+            for (const [id, cached] of Object.entries(initialUsage)) {
+                const previous = next[id];
+                next[id] = {
+                    ...previous,
+                    ...cached,
+                    // 旧版 Server/缓存没有这两个字段，不要用 undefined 抹掉
+                    // 本机刚刚通过 /wham/usage 查到的余额。
+                    credits_balance: cached.credits_balance !== undefined
+                        ? cached.credits_balance
+                        : previous?.credits_balance,
+                    has_credits: cached.has_credits !== undefined
+                        ? cached.has_credits
+                        : previous?.has_credits,
+                };
+            }
+            return next;
+        });
         setRelayUsageMap(prev => ({ ...prev, ...initialRelayUsage }));
         setInvalidIds(initialInvalids);
         setBannedIds(initialBanned);
@@ -705,7 +729,7 @@ export function AccountList({
             setCookieEditor(null);
             await handleRefreshOne(id);
         } catch (e) {
-            setPushToast({ type: 'error', text: `保存 MiMo Cookie 失败: ${e}` });
+            setPushToast({ type: 'error', text: `保存额度凭证失败: ${e}` });
             setTimeout(() => setPushToast(null), 4000);
         } finally {
             setSavingCookie(false);
@@ -716,13 +740,16 @@ export function AccountList({
     /// - unit 是 `%` → 进度条 mini-card（GLM 这种百分比模型）
     /// - 其它（USD/CNY 等金额） → 纯文本 mini-card（unity2 等返回金额的）
     const RelayQuotaItem = ({ account, cache }: { account: Account; cache: RelayUsageCache | undefined }) => {
-        const isMiMoRelay = [
+        const isQuotaCookieRelay = [
             account.relay_usage_preset,
             account.relay_base_url,
             account.relay_homepage,
             account.name,
-        ].some(v => (v ?? '').toLowerCase().includes('mimo') || (v ?? '').toLowerCase().includes('xiaomimimo'));
-        const canEditCookie = isMiMoRelay;
+        ].some(v => {
+            const value = (v ?? '').toLowerCase();
+            return value.includes('mimo') || value.includes('xiaomimimo') || value.includes('stepfun_plan');
+        });
+        const canEditCookie = isQuotaCookieRelay;
         const openCookieEditor = () => {
             if (!canEditCookie) return;
             setCookieEditor({
@@ -735,7 +762,7 @@ export function AccountList({
             ? {
                 role: 'button',
                 tabIndex: 0,
-                title: '点击修改 MiMo 配额 Cookie',
+                title: '点击修改额度查询凭证',
                 onClick: openCookieEditor,
                 onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -807,6 +834,25 @@ export function AccountList({
                         <span>{displayTime}</span>
                     </div>
                     <span className={`quota-percent ${color}`}>{Math.round(percentage)}%</span>
+                </div>
+            </div>
+        );
+    };
+
+    const CreditsQuotaItem = ({ balance }: { balance?: number | null }) => {
+        const knownBalance = typeof balance === 'number' && Number.isFinite(balance);
+        // Credits 为 0 时不占用额度列空间；只有明确有可消费余额才展示。
+        if (!knownBalance || balance <= 0) return null;
+        const value = balance.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        const tone = 'green';
+        return (
+            <div
+                className={`quota-mini-card credits ${tone}`}
+                aria-label={`额度余额 ${value}`}
+                title={knownBalance ? '来自 /wham/usage 的 credits.balance' : '请刷新该账号额度以查询 credits.balance'}
+            >
+                <div className="quota-mini-content">
+                    <span className={`quota-credits-value ${tone}`}>{value}</span>
                 </div>
             </div>
         );
@@ -1012,7 +1058,7 @@ export function AccountList({
                                         )}
                                         {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isLoggedOut ? <span className="badge logged-out" title="登录已失效，可能是 refresh_token 过期、被撤销或会话在其他设备结束">需重新登录</span> : isInvalid && <span className="badge expired" title="该账号 Token 已过期或失效">过期</span>}
                                         {expiry.badge && <span className={`badge account-expiry ${expiry.tone}`} title={expiry.title}>📅 {expiry.badge}</span>}
-                                        {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}
+                                        {usage?.plan_type && <span className="badge plan">{formatPlanLabel(usage.plan_type)}</span>}
                                         {kind === 'chatgpt_oauth' && usage?.reset_credits == null && (
                                             <button type="button" className="badge reset-credits clickable"
                                                 title="上游未返回重置次数，不代表次数已清空。点击查询银行明细。"
@@ -1020,19 +1066,15 @@ export function AccountList({
                                                 🔄 次数未知
                                             </button>
                                         )}
-                                        {usage?.reset_credits != null && (
-                                            usage.reset_credits > 0 ? (
-                                                <span
-                                                    className={`badge reset-credits clickable${rateLimited ? ' limited' : ''}`}
-                                                    title={rateLimited
-                                                        ? '⚡ 当前已被限流（额度桶为 0）——现在用一次主动重置回收最大，点击查看明细'
-                                                        : '点击查看所有主动重置次数（含各自到期时间），再消耗一次重置限额窗口'}
-                                                    onClick={() => openResetModal(acc.id, acc.name, usage.reset_credits ?? 0)}
-                                                    style={{ cursor: 'pointer' }}
-                                                >{rateLimited ? '⚡' : ''}🔄 {usage.reset_credits}</span>
-                                            ) : (
-                                                <span className="badge reset-credits" title="主动重置次数（剩余 0 次，无法重置）">🔄 {usage.reset_credits}</span>
-                                            )
+                                        {usage?.reset_credits != null && usage.reset_credits > 0 && (
+                                            <span
+                                                className={`badge reset-credits clickable${rateLimited ? ' limited' : ''}`}
+                                                title={rateLimited
+                                                    ? '⚡ 当前已被限流（额度桶为 0）——现在用一次主动重置回收最大，点击查看明细'
+                                                    : '点击查看所有主动重置次数（含各自到期时间），再消耗一次重置限额窗口'}
+                                                onClick={() => openResetModal(acc.id, acc.name, usage.reset_credits ?? 0)}
+                                                style={{ cursor: 'pointer' }}
+                                            >{rateLimited ? '⚡' : ''}🔄 {usage.reset_credits}</span>
                                         )}
                                     </div>
                                 </div>
@@ -1061,6 +1103,13 @@ export function AccountList({
                                                     resetAt={usage.luna_reserve.reset_at ?? undefined}
                                                 />
                                             )}
+                                            {kind === 'chatgpt_oauth' && (
+                                                <CreditsQuotaItem balance={usage.credits_balance} />
+                                            )}
+                                        </div>
+                                    ) : kind === 'chatgpt_oauth' ? (
+                                        <div className="quota-grid">
+                                            <CreditsQuotaItem />
                                         </div>
                                     ) : <span className="quota-empty">未获取数据</span>}
                                 </div>
@@ -1147,7 +1196,12 @@ export function AccountList({
                                         </button>
                                     )}
                                     {effectiveKind(acc) === 'chatgpt_oauth' && (usage?.plan_type ?? '').toLowerCase() !== 'free' && (
-                                        <button className="action-btn invite" onClick={() => openInvite(acc.id, acc.name)} title="ChatGPT 桌面版邀请与奖励"><UserPlus size={14} /></button>
+                                        (() => {
+                                            const referralProgram = referralProgramForPlan(usage?.plan_type ?? acc.cached_quota?.plan_type);
+                                            return referralProgram ? (
+                                                <button className="action-btn invite" onClick={() => openInvite(acc.id, acc.name, referralProgram)} title={referralProgram === 'codex_referral_workspace' ? '邀请同事使用 ChatGPT 桌面版' : '邀请朋友使用 ChatGPT 桌面版'}><UserPlus size={14} /></button>
+                                            ) : null;
+                                        })()
                                     )}
                                     <button className="action-btn delete" onClick={() => setAccountToDelete({ id: acc.id, name: acc.name })} title="删除"><Trash2 size={14} /></button>
                                 </div>
@@ -1338,9 +1392,13 @@ export function AccountList({
             {cookieEditor && (
                 <div className="modal-overlay" onClick={() => !savingCookie && setCookieEditor(null)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()}>
+                        {(() => {
+                            const cookieAccount = accounts.find(account => account.id === cookieEditor.id);
+                            const isStepFun = cookieAccount?.relay_usage_preset === 'stepfun_plan';
+                            return <>
                         <div className="modal-header">
                             <div className="header-top">
-                                <h2>修改 MiMo 配额 Cookie</h2>
+                                <h2>{isStepFun ? '修改 StepFun 额度凭证' : '修改 MiMo 配额 Cookie'}</h2>
                                 <button className="close-btn" onClick={() => setCookieEditor(null)} disabled={savingCookie}>
                                     ×
                                 </button>
@@ -1348,13 +1406,15 @@ export function AccountList({
                         </div>
                         <div className="modal-body">
                             <p className="modal-tip" style={{ marginBottom: 12 }}>
-                                账号：{cookieEditor.name}。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。
+                                {isStepFun
+                                    ? <>账号：{cookieEditor.name}。登录 <code>platform.stepfun.com</code> 后复制 <code>Oasis-Token</code>，也可粘贴包含它的 Cookie header。</>
+                                    : <>账号：{cookieEditor.name}。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。</>}
                             </p>
                             <textarea
                                 value={cookieEditor.value}
                                 onChange={e => setCookieEditor(prev => prev ? { ...prev, value: e.target.value } : prev)}
                                 rows={5}
-                                placeholder="Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=..."
+                                placeholder={isStepFun ? 'Oasis-Token=...（或直接粘贴 token）' : 'Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=...'}
                                 style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, width: '100%' }}
                                 disabled={savingCookie}
                             />
@@ -1367,11 +1427,13 @@ export function AccountList({
                                 {savingCookie ? '保存中…' : '保存并刷新'}
                             </button>
                         </div>
+                            </>;
+                        })()}
                     </div>
                 </div>
             )}
 
-            {inviteModal && <ReferralInviteModal key={inviteModal.id} {...inviteModal} onClose={() => setInviteModal(null)} />}
+            {inviteModal && <ReferralInviteModal key={`${inviteModal.id}:${inviteModal.program}`} {...inviteModal} onClose={() => setInviteModal(null)} />}
         </div>
     );
 }

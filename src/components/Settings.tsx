@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Palette, Server, Monitor, Wrench, Save, Github, Radio, Smartphone, Search, X } from 'lucide-react';
 import { Account, effectiveKind } from '../hooks/useAccounts';
+import { formatPlanLabel } from '../utils/planLabel';
 import './Settings.css';
 import { isMacOS } from '../platform';
 
@@ -737,7 +738,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                         📱 {anchorAccount.name}
                                         <span className={`anchor-current-plan plan-${(anchorAccount.cached_quota?.plan_type || 'unknown').toLowerCase()}`}>
                                             {anchorAccount.cached_quota?.plan_type
-                                                ? anchorAccount.cached_quota.plan_type.toUpperCase()
+                                                ? formatPlanLabel(anchorAccount.cached_quota.plan_type)
                                                 : '未知'}
                                         </span>
                                     </>

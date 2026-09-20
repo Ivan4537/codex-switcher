@@ -601,7 +601,7 @@ fn set_account_window_priming(
     Ok(())
 }
 
-/// 更新 Relay usage 专用 Cookie（MiMo Token Plan 等控制台配额接口使用）。
+/// 更新 Relay usage 专用网页登录凭证（MiMo Cookie、StepFun Oasis-Token 等控制台配额接口使用）。
 #[tauri::command]
 fn update_relay_usage_cookie(
     state: State<AppState>,
@@ -890,6 +890,47 @@ async fn add_relay_account(
     Ok(account)
 }
 
+/// 从 Relay 的 OpenAI-compatible `/models` 接口刷新原生模型目录。
+#[tauri::command]
+async fn refresh_relay_models(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let (base, api_key) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store.accounts.get(&id).ok_or("账号不存在")?;
+        if !account.is_relay() {
+            return Err("不是中转站账号".to_string());
+        }
+        (
+            account
+                .relay_base_url
+                .clone()
+                .ok_or("中转站账号缺 base_url")?,
+            AccountStore::extract_access_token(&account.auth_json).ok_or("中转站账号缺 api_key")?,
+        )
+    };
+
+    let models = relay_catalog::fetch_models(crate::usage::usage_client(), &base, &api_key).await?;
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store
+            .accounts
+            .get_mut(&id)
+            .ok_or("账号在刷新模型时被删除")?;
+        if account.relay_base_url.as_deref() != Some(base.as_str())
+            || AccountStore::extract_access_token(&account.auth_json).as_deref()
+                != Some(api_key.as_str())
+        {
+            return Err("账号在刷新模型时发生变化".to_string());
+        }
+        account.relay_model_catalog = models.clone();
+        relay_catalog::ensure_currents(&mut store);
+        store.save()?;
+    }
+    Ok(models)
+}
+
 /// 更新 Relay 账号的模型映射 / 兜底 / 上游协议（编辑功能用）。
 #[tauri::command]
 fn update_relay_model_map(
@@ -987,6 +1028,11 @@ async fn refresh_relay_usage(
             let cookie = usage_cookie
                 .ok_or("MiMo 配额查询需要登录 platform.xiaomimimo.com 后复制 Cookie header")?;
             UsageFetcher::fetch_relay_usage_mimo_token_plan(&cookie).await?
+        }
+        Some("stepfun_plan") => {
+            let token = usage_cookie
+                .ok_or("StepFun 额度查询需要登录 platform.stepfun.com 后复制 Oasis-Token")?;
+            UsageFetcher::fetch_relay_usage_stepfun_plan(&token).await?
         }
         Some(other) => return Err(format!("未支持的 usage_preset: {}", other)),
         None => return Err("usage 策略未确定".to_string()),
@@ -1487,6 +1533,8 @@ async fn switch_account(
                         weekly_label: usage.weekly_label.clone(),
                         plan_type: usage.plan_type.clone(),
                         is_valid_for_cli: usage.is_valid_for_cli,
+                        credits_balance: usage.credits_balance,
+                        has_credits: usage.has_credits,
                         reset_credits: usage.reset_credits,
                         spark: usage.spark.clone(),
                         luna_reserve: usage.luna_reserve.clone(),
@@ -2183,6 +2231,8 @@ fn cached_quota_from_usage(usage: &usage::UsageDisplay) -> account::CachedQuota 
         weekly_label: usage.weekly_label.clone(),
         plan_type: usage.plan_type.clone(),
         is_valid_for_cli: usage.is_valid_for_cli,
+        credits_balance: usage.credits_balance,
+        has_credits: usage.has_credits,
         reset_credits: usage.reset_credits,
         spark: usage.spark.clone(),
         luna_reserve: usage.luna_reserve.clone(),
@@ -2475,7 +2525,12 @@ pub fn start_quota_refresh(
                                         //    污染本地。is_banned 也同样跳过（Relay 没有"封号"概念）。
                                         for e in &entries {
                                             if let Some(acc) = s.accounts.get_mut(&e.id) {
-                                                if let Some(q) = e.cached_quota.clone() {
+                                                if let Some(mut q) = e.cached_quota.clone() {
+                                                    if let Some(previous) =
+                                                        acc.cached_quota.as_ref()
+                                                    {
+                                                        q.preserve_credits_from(previous);
+                                                    }
                                                     acc.cached_quota = Some(q);
                                                     updated += 1;
                                                 }
@@ -3145,7 +3200,8 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
                 };
 
                 let effective = if is_free { five_h } else { five_h.min(weekly) };
-                if effective <= 0.0 {
+                let has_spendable_credits = q.has_spendable_credits();
+                if effective <= 0.0 && !has_spendable_credits {
                     continue;
                 }
                 // Plus 的 5h 窗口一旦回满，优先把它用起来，避免在其它订阅号上
@@ -3157,8 +3213,15 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
                     0.0
                 };
 
-                // 最终评分 = 满额 Plus 硬优先级 + 额度分 + Plan 加分
-                full_plus_bonus + effective + plan_bonus
+                // 余额只作为套餐窗口耗尽后的兜底，不抢占仍有窗口额度的账号。
+                let credits_fallback_bonus = if effective <= 0.0 && has_spendable_credits {
+                    0.5
+                } else {
+                    0.0
+                };
+
+                // 最终评分 = 满额 Plus 硬优先级 + 窗口额度分 + Plan 加分 + 余额兜底标记
+                full_plus_bonus + effective + plan_bonus + credits_fallback_bonus
             }
         };
 
@@ -3233,19 +3296,14 @@ pub async fn switch_to_next_account_internal(
             }
         };
 
-        let plan = quota.plan_type.to_lowercase();
-        let is_free = plan == "free" || plan == "unknown";
-
-        let has_quota = if is_free {
-            quota.five_hour_left > 0
-        } else {
-            quota.five_hour_left > 0 && quota.weekly_left > 0
-        };
-
-        if has_quota {
+        if quota.has_usable_quota() {
             println!(
-                "[SmartSwitch] 选中最优账号: {} ({}, 5h={}%, 周={}%)",
-                target_name, quota.plan_type, quota.five_hour_left, quota.weekly_left
+                "[SmartSwitch] 选中最优账号: {} ({}, 5h={}%, 周={}%, credits={:?})",
+                target_name,
+                quota.plan_type,
+                quota.five_hour_left,
+                quota.weekly_left,
+                quota.credits_balance
             );
             return switch_account(state, app.clone(), target_id.clone()).await;
         } else {
@@ -3427,6 +3485,8 @@ fn usage_to_cached(u: &UsageDisplay) -> crate::account::CachedQuota {
         weekly_label: u.weekly_label.clone(),
         plan_type: u.plan_type.clone(),
         is_valid_for_cli: u.is_valid_for_cli,
+        credits_balance: u.credits_balance,
+        has_credits: u.has_credits,
         reset_credits: u.reset_credits,
         spark: u.spark.clone(),
         luna_reserve: u.luna_reserve.clone(),
@@ -4027,6 +4087,8 @@ async fn get_quota_by_id(
                 weekly_label: usage.weekly_label.clone(),
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
+                credits_balance: usage.credits_balance,
+                has_credits: usage.has_credits,
                 reset_credits: usage.reset_credits,
                 spark: usage.spark.clone(),
                 luna_reserve: usage.luna_reserve.clone(),
@@ -4055,6 +4117,8 @@ async fn get_quota_by_id(
                 weekly_label: usage.weekly_label.clone(),
                 plan_type: usage.plan_type.clone(),
                 is_valid_for_cli: usage.is_valid_for_cli,
+                credits_balance: usage.credits_balance,
+                has_credits: usage.has_credits,
                 reset_credits: usage.reset_credits,
                 spark: usage.spark.clone(),
                 luna_reserve: usage.luna_reserve.clone(),
@@ -5497,50 +5561,53 @@ fn get_sync_status(state: State<AppState>) -> Result<SyncStatus, String> {
 fn sync_active_with_disk(state: State<AppState>, app: tauri::AppHandle) -> Result<(), String> {
     let disk_auth = AccountStore::read_codex_auth()?;
     let disk_email = AccountStore::extract_email(&disk_auth);
-    let mut store = state.store.lock().map_err(|e| e.to_string())?;
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
 
-    // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，"按 disk 对齐 current" 等于
-    // 把 current 强拉回 anchor —— 破坏整个 anchor 设计的目的。直接拒绝。
-    // 用户想换 anchor 应该走 set_session_anchor，想离开 anchor 模式应该先取消 anchor。
-    if let Some(anchor_id) = store.session_anchor_id() {
-        if store.current.as_deref() != Some(anchor_id.as_str()) {
-            return Err(
-                "手机锚生效中：disk 是 anchor 的镜像，不能用它对齐 current。\
-                 想离开 anchor 模式请先在 anchor 账号上点 📱 按钮取消"
-                    .to_string(),
-            );
+        // 手机锚模式（v0.7+）：disk 故意锁在 anchor 上，"按 disk 对齐 current" 等于
+        // 把 current 强拉回 anchor —— 破坏整个 anchor 设计的目的。直接拒绝。
+        // 用户想换 anchor 应该走 set_session_anchor，想离开 anchor 模式应该先取消 anchor。
+        if let Some(anchor_id) = store.session_anchor_id() {
+            if store.current.as_deref() != Some(anchor_id.as_str()) {
+                return Err(
+                    "手机锚生效中：disk 是 anchor 的镜像，不能用它对齐 current。\
+                     想离开 anchor 模式请先在 anchor 账号上点 📱 按钮取消"
+                        .to_string(),
+                );
+            }
         }
+
+        // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
+        let matching_id = disk_email
+            .as_deref()
+            .and_then(|email| {
+                let email_lower = email.to_lowercase();
+                store
+                    .accounts
+                    .values()
+                    .find(|a| {
+                        AccountStore::extract_email(&a.auth_json)
+                            .map(|e| e.to_lowercase() == email_lower)
+                            .unwrap_or(false)
+                            || a.name.to_lowercase() == email_lower
+                    })
+                    .map(|a| a.id.clone())
+            })
+            .or_else(|| {
+                // fallback: account_id 匹配
+                store
+                    .accounts
+                    .values()
+                    .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
+                    .map(|a| a.id.clone())
+            })
+            .ok_or_else(|| "磁盘账号不在管理列表中，请先导入".to_string())?;
+
+        // 安全：只改指针，不覆盖 Token。避免封号 Token 污染好号。
+        store.current = Some(matching_id);
+        store.save()?;
+        // 必须在此作用域结束后再更新托盘；托盘更新会重新读取 store。
     }
-
-    // 优先用 JWT Email 匹配（最可靠），其次才用 account_id
-    let matching_id = disk_email
-        .as_deref()
-        .and_then(|email| {
-            let email_lower = email.to_lowercase();
-            store
-                .accounts
-                .values()
-                .find(|a| {
-                    AccountStore::extract_email(&a.auth_json)
-                        .map(|e| e.to_lowercase() == email_lower)
-                        .unwrap_or(false)
-                        || a.name.to_lowercase() == email_lower
-                })
-                .map(|a| a.id.clone())
-        })
-        .or_else(|| {
-            // fallback: account_id 匹配
-            store
-                .accounts
-                .values()
-                .find(|a| AccountStore::auth_identity_matches(&a.auth_json, &disk_auth))
-                .map(|a| a.id.clone())
-        })
-        .ok_or_else(|| "磁盘账号不在管理列表中，请先导入".to_string())?;
-
-    // 安全：只改指针，不覆盖 Token。避免封号 Token 污染好号。
-    store.current = Some(matching_id);
-    store.save()?;
 
     crate::tray::update_tray_menu(&app);
     Ok(())
@@ -5670,7 +5737,14 @@ async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
     let remote_accounts = remote_client::list_accounts(&url, &secret).await?;
     let mut merged = 0usize;
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
-    for ra in remote_accounts {
+    for mut ra in remote_accounts {
+        if let Some(previous) = store.accounts.get(&ra.id) {
+            if let (Some(previous_quota), Some(incoming_quota)) =
+                (previous.cached_quota.as_ref(), ra.cached_quota.as_mut())
+            {
+                incoming_quota.preserve_credits_from(previous_quota);
+            }
+        }
         store.accounts.insert(ra.id.clone(), ra);
         merged += 1;
     }
@@ -6297,6 +6371,7 @@ pub fn run() {
             export_accounts,
             import_accounts,
             add_relay_account,
+            refresh_relay_models,
             update_relay_model_map,
             refresh_relay_usage,
             bulk_import_accounts,
@@ -6446,6 +6521,7 @@ mod tests {
             relay_usage_cookie: None,
             relay_usage_cache: None,
             relay_model_map: None,
+            relay_model_catalog: Vec::new(),
             relay_model_fallback: None,
             relay_protocol: None,
             relay_category: None,
@@ -6479,6 +6555,8 @@ mod tests {
             weekly_label: "7D".to_string(),
             plan_type: "plus".to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6511,6 +6589,8 @@ mod tests {
             weekly_label: "7D".to_string(),
             plan_type: "plus".to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6613,6 +6693,8 @@ mod tests {
             // 套餐名故意写 plus：窗口语义必须服从返回时长而不是 plan。
             plan_type: "plus".to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6651,6 +6733,8 @@ mod tests {
             weekly_label: "周限额".to_string(),
             plan_type: "plus".to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6674,6 +6758,8 @@ mod tests {
             // 套餐名故意写 team：5H 返回仍必须按 5H 管理。
             plan_type: "team".to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6818,6 +6904,8 @@ mod tests {
             weekly_label: "7D".to_string(),
             plan_type: plan_type.to_string(),
             is_valid_for_cli: true,
+            credits_balance: None,
+            has_credits: false,
             reset_credits: None,
             spark: None,
             luna_reserve: None,
@@ -6839,6 +6927,42 @@ mod tests {
         assert_eq!(
             candidates.first().map(|candidate| candidate.0.as_str()),
             Some("plus")
+        );
+    }
+
+    #[test]
+    fn credit_only_account_is_a_switch_candidate_after_rate_limits_empty() {
+        let now = Utc::now();
+        let mut store = AccountStore::default();
+        store.current = Some("current".to_string());
+        let mut credit_only = test_account("credits", "credits-account", "rt-credits");
+        credit_only.id = "credits".to_string();
+        credit_only.cached_quota = Some(account::CachedQuota {
+            five_hour_left: 0.0,
+            five_hour_reset: "".to_string(),
+            five_hour_reset_at: Some(now.timestamp() + 3600),
+            primary_window_seconds: Some(5 * 3600),
+            five_hour_label: "5H".to_string(),
+            weekly_left: 0.0,
+            weekly_reset: "".to_string(),
+            weekly_reset_at: Some(now.timestamp() + 7 * 24 * 3600),
+            secondary_window_seconds: Some(7 * 24 * 3600),
+            weekly_label: "7D".to_string(),
+            plan_type: "plus".to_string(),
+            is_valid_for_cli: true,
+            credits_balance: Some(1000.0),
+            has_credits: true,
+            reset_credits: None,
+            spark: None,
+            luna_reserve: None,
+            updated_at: now,
+        });
+        store.accounts.insert(credit_only.id.clone(), credit_only);
+
+        let candidates = score_candidate_accounts(&store);
+        assert_eq!(
+            candidates.first().map(|candidate| candidate.0.as_str()),
+            Some("credits")
         );
     }
 }

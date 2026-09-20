@@ -1,7 +1,10 @@
 import { UsageDisplay } from '../hooks/useUsage';
-import { Account } from '../hooks/useAccounts';
+import { Account, effectiveKind } from '../hooks/useAccounts';
 import { StatsBar } from './StatsBar';
 import { UsageCard } from './UsageCard';
+import { ReferralQuotaCard } from './ReferralQuotaCard';
+import { referralProgramForPlan } from './referral';
+import { formatPlanLabel } from '../utils/planLabel';
 import './Dashboard.css';
 
 interface DashboardProps {
@@ -66,6 +69,9 @@ export function Dashboard({
     };
 
     const bestAccount = getBestAccount();
+    const referralProgram = currentAccount && effectiveKind(currentAccount) === 'chatgpt_oauth'
+        ? referralProgramForPlan(usage?.plan_type ?? currentAccount.cached_quota?.plan_type)
+        : null;
 
     return (
         <div className="dashboard">
@@ -143,7 +149,7 @@ export function Dashboard({
                                 <span className="email-icon">✉</span>
                                 <span className="email">{currentAccount.name}</span>
                                 {usage?.plan_type && (
-                                    <span className="plan-badge">{usage.plan_type.toUpperCase()}</span>
+                                    <span className="plan-badge">{formatPlanLabel(usage.plan_type)}</span>
                                 )}
                             </div>
 
@@ -183,6 +189,10 @@ export function Dashboard({
                                     error={usageError}
                                     onRefresh={onRefreshUsage}
                                 />
+                            )}
+
+                            {currentAccount && referralProgram && (
+                                <ReferralQuotaCard accountId={currentAccount.id} program={referralProgram} />
                             )}
 
                             <button

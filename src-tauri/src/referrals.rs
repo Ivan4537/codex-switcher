@@ -131,6 +131,13 @@ fn send_body(
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty() && seen.insert(e.to_lowercase()))
         .collect();
+    if offer
+        .get("remaining_reward_capacity")
+        .and_then(Value::as_u64)
+        == Some(0)
+    {
+        return Err("当前没有剩余奖励名额，已阻止发送邀请".into());
+    }
     let mut cap = offer["remaining_send_capacity"]
         .as_u64()
         .unwrap_or(0)
@@ -210,5 +217,14 @@ mod tests {
         n = o.clone();
         n["remaining_send_capacity"] = json!(0);
         assert!(send_body("codex_referral_consumer", emails, &n, &o).is_err());
+        n = o.clone();
+        n["remaining_reward_capacity"] = json!(0);
+        assert!(send_body(
+            "codex_referral_consumer",
+            vec!["a@example.com".into()],
+            &n,
+            &n,
+        )
+        .is_err());
     }
 }

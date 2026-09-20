@@ -1,7 +1,7 @@
 import type {Account} from '../hooks/useAccounts';
 
 export function relayModelIds(account: Account): string[] {
-    if(account.kind!=='relay'||(account.relay_protocol||'responses')!=='responses')return [];
+    if(account.kind!=='relay')return [];
     const isAgy = /^(https?:\/\/)?(127\.0\.0\.1|localhost):28100\/v1\/?$/i.test(account.relay_base_url||'');
     const agyModels = isAgy ? [
         'gemini-3.8-flash-high','gemini-3.8-flash-medium','gemini-3.8-flash-low',
@@ -10,7 +10,7 @@ export function relayModelIds(account: Account): string[] {
         'gemini-3.1-pro-high','gemini-3.1-pro-low','claude-sonnet-4-6',
         'claude-opus-4-6-thinking','gpt-oss-120b-medium',
     ] : [];
-    return [...new Set([...agyModels,account.relay_model_fallback,...Object.values(account.relay_model_map||{})]
+    return [...new Set([...agyModels, ...(account.relay_model_catalog || []), account.relay_model_fallback,...Object.values(account.relay_model_map||{})]
         .filter((v):v is string=>typeof v==='string'&&!!v.trim()).map(v=>v.trim()))].sort((a,b)=>{
         const rank=(id:string)=>id.startsWith('gemini-')?0:id.startsWith('claude-')?1:id.startsWith('gpt-')?2:3;
         const av=(a.match(/\d+/g)||[]).map(Number), bv=(b.match(/\d+/g)||[]).map(Number);

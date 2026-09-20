@@ -6,6 +6,7 @@ import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readFile } from '@tauri-apps/plugin-fs';
 import { useAccounts } from '../hooks/useAccounts';
 import { RELAY_PRESETS } from '../data/relay_presets';
+import { formatPlanLabel } from '../utils/planLabel';
 import './AddAccountModal.css';
 
 interface AddAccountModalProps {
@@ -175,15 +176,17 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
             setRelayError('API Key 看起来太短');
             return;
         }
-        if (relayUsagePreset === 'mimo_token_plan' && !relayUsageCookie.trim()) {
-            setRelayError('MiMo 配额查询需要粘贴 platform.xiaomimimo.com 的 Cookie；如果暂时不查配额，请把余额查询策略改成“不拉取”。');
+        if ((relayUsagePreset === 'mimo_token_plan' || relayUsagePreset === 'stepfun_plan') && !relayUsageCookie.trim()) {
+            setRelayError(relayUsagePreset === 'stepfun_plan'
+                ? 'StepFun 额度查询需要粘贴 platform.stepfun.com 的 Oasis-Token；如果暂时不查配额，请把余额查询策略改成“不拉取”。'
+                : 'MiMo 配额查询需要粘贴 platform.xiaomimimo.com 的 Cookie；如果暂时不查配额，请把余额查询策略改成“不拉取”。');
             return;
         }
         setRelaySubmitting(true);
         try {
             const preset = RELAY_PRESETS.find(p => p.id === relayPresetId);
             const modelMap = parseModelMapText(relayModelMapText);
-            await invoke('add_relay_account', {
+            const account = await invoke<{ id: string }>('add_relay_account', {
                 name: relayName.trim(),
                 baseUrl: relayBaseUrl.trim(),
                 apiKey: relayApiKey.trim(),
@@ -194,7 +197,11 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                 modelMap: Object.keys(modelMap).length > 0 ? modelMap : null,
                 modelFallback: relayModelFallback.trim() || null,
                 relayProtocol: relayProtocol === 'responses' ? null : relayProtocol,
+                relayCategory: preset?.category ?? 'aggregator',
             });
+            if (preset?.id === 'stepfun_plan') {
+                await invoke('refresh_relay_models', { id: account.id });
+            }
             await emit('accounts-updated');
             // 重置表单
             setRelayApiKey('');
@@ -553,7 +560,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                                     {bulkResult.accounts.map((a, i) => (
                                                         <tr key={i}>
                                                             <td>{a.email}</td>
-                                                            <td>{a.plan_type || '—'}</td>
+                                                            <td>{formatPlanLabel(a.plan_type) || '—'}</td>
                                                             <td>{a.needs_refresh ? <span className="needs-refresh">⚠ 仅 RT，首次请求自动 refresh</span> : '✓ ready'}</td>
                                                         </tr>
                                                     ))}
@@ -621,7 +628,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                                     {sessionResult.ok.map((item, i) => (
                                                         <tr key={i}>
                                                             <td>{item.info.email || item.account.name}</td>
-                                                            <td>{item.info.plan_type || '—'}</td>
+                                                            <td>{formatPlanLabel(item.info.plan_type) || '—'}</td>
                                                             <td>
                                                                 {item.info.has_refresh_token
                                                                     ? '✓ 含 refresh_token'
@@ -721,14 +728,17 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                     <option value="glm_zhipu">glm_zhipu (GLM 自家 quota 接口)</option>
                                     <option value="kimi_coding">kimi_coding (Kimi 编程套餐 5H / 7D)</option>
                                     <option value="mimo_token_plan">mimo_token_plan (MiMo 控制台 Cookie)</option>
+                                    <option value="stepfun_plan">stepfun_plan (StepFun 控制台 Oasis-Token)</option>
                                 </select>
                             </div>
 
-                            {relayUsagePreset === 'mimo_token_plan' && (
+                            {(relayUsagePreset === 'mimo_token_plan' || relayUsagePreset === 'stepfun_plan') && (
                                 <div className="form-group form-group-full">
                                     <label htmlFor="relay-usage-cookie">
-                                        MiMo 配额 Cookie <span style={{ color: 'var(--text-muted)', fontWeight: 'normal', fontSize: 12 }}>
-                                            登录 platform.xiaomimimo.com 后，从 Network 复制 Cookie header
+                                        {relayUsagePreset === 'stepfun_plan' ? 'StepFun 额度凭证' : 'MiMo 配额 Cookie'} <span style={{ color: 'var(--text-muted)', fontWeight: 'normal', fontSize: 12 }}>
+                                            {relayUsagePreset === 'stepfun_plan'
+                                                ? '登录 platform.stepfun.com 后复制 Oasis-Token，也可粘贴 Cookie header'
+                                                : '登录 platform.xiaomimimo.com 后，从 Network 复制 Cookie header'}
                                         </span>
                                     </label>
                                     <textarea
@@ -737,11 +747,15 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                         onChange={e => setRelayUsageCookie(e.target.value)}
                                         disabled={relaySubmitting}
                                         rows={3}
-                                        placeholder="Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=..."
+                                        placeholder={relayUsagePreset === 'stepfun_plan'
+                                            ? 'Oasis-Token=...（或直接粘贴 token）'
+                                            : 'Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=...'}
                                         style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, width: '100%' }}
                                     />
                                     <p className="modal-tip" style={{ margin: '6px 0 0', fontSize: 12 }}>
-                                        这里的 Cookie 只用于查询 Token Plan 用量，不会参与模型请求。实际调用仍使用上面的 tp-key。
+                                        {relayUsagePreset === 'stepfun_plan'
+                                            ? '该凭证只用于查询 Step Plan 额度，不会参与模型请求；实际调用仍使用上面的 Step API Key。'
+                                            : '这里的 Cookie 只用于查询 Token Plan 用量，不会参与模型请求。实际调用仍使用上面的 tp-key。'}
                                     </p>
                                 </div>
                             )}
