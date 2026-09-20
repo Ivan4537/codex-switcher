@@ -8,6 +8,12 @@
 
 **中文** | [English](#english) | [Русский](#русский)
 
+> **v0.7.19 新增：阶跃星辰 StepFun Step Plan 支持。**
+>
+> 在「添加中转 → CODING PLAN → 阶跃星辰 Step Plan」中填入 Step API Key，即可接入 `https://api.stepfun.com/step_plan/v1`。Switcher 会直接读取官方 `/models` 返回的原生 `step-*` 模型，模型列表中可直接选择，不需要 GPT 别名映射。
+>
+> Step Plan 的额度查询可选填 `platform.stepfun.com` 的 `Oasis-Token`；它只用于读取订阅 Credit / 加油包额度，不参与模型请求。Step Plan 使用 Chat Completions 协议，Switcher 会自动转换 Codex Responses 请求。
+
 > **Luna Reserve 备用额度现已支持。** 当账号的常规高级模型额度暂时耗尽时，Switcher 会识别该账号可用的 Luna Reserve，并让 `gpt-5.6-luna` 继续使用这部分独立额度，避免因误判常规额度耗尽而提前切换账号。
 
 ### Luna Reserve 是什么
@@ -21,6 +27,11 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 ![账号列表中的 Luna Reserve](docs/assets/luna-reserve-account-card.png)
 
 当 Luna Reserve 仍可用时，使用 `gpt-5.6-luna` 不会因为普通额度耗尽而自动切换账号；Reserve 耗尽、过期或明确不可用后，系统才恢复正常的切号策略。
+
+## v0.7.19 更新说明
+
+- **阶跃星辰 StepFun Step Plan**：接入 Step Plan Chat Completions，直接读取官方原生模型目录并在 Codex 模型选择器中展示；接入订阅 Credit、加油包和 5H/7D 额度查询。
+- **协议兼容修复**：修复 Chat Completions Relay 的 zstd 请求体重复解压，以及 function tool 缺少合法 `parameters` 导致 StepFun `input_invalid` 的问题。
 
 ## v0.7.16 更新说明
 
@@ -71,7 +82,7 @@ Switcher 会从用量接口读取这项独立额度，并在账号列表中单�
 
 Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面工具。它把账号管理、配额观察、本地代理、无损自动切号、中转站、Coding Plan 接入、远程账号池和 Skills 管理放在同一个 Tauri 应用里，适合长期使用 Codex CLI、Codex App，以及支持 Codex 插件的 VS Code 及其衍生 IDE 的多账号环境。
 
-**一句话：当前账号限额了，前端任务不用停，Codex Switcher 在代理层自动换号、切换中转站或接入 Coding Plan，并自动重发请求。Coding Plan 目前已支持 GLM 和 Xiaomi MiMo Token Plan，其他平台待实测。**
+**一句话：当前账号限额了，前端任务不用停，Codex Switcher 在代理层自动换号、切换中转站或接入 Coding Plan，并自动重发请求。Coding Plan 目前支持 GLM、Xiaomi MiMo Token Plan 和阶跃星辰 StepFun Step Plan。**
 
 [下载最新版](https://github.com/xtftbwvfp/codex-switcher/releases/latest) · [配合 glance 使用](https://github.com/xtftbwvfp/glance)
 
@@ -90,6 +101,7 @@ Codex Switcher 是一个面向 Codex CLI / Codex App 多账号工作流的桌面
 - **Credits 余额与邀请管理**：账号列表直接显示 ChatGPT Credits 余额，并区分 0 与未查询；邀请入口按 Plus/Pro 或 Team/Business/Enterprise/Edu 选择对应活动。
 - **统一账号池**：集中管理 ChatGPT OAuth、OpenAI API Key、第三方 Relay、Coding Plan 和远程账号池，并支持按类型、套餐和状态筛选。
 - **多协议与模型接入**：支持原生 Responses 转发，也支持转换为 Chat Completions，接入 GLM、Xiaomi MiMo、DeepSeek、Kimi、MiniMax、通义、火山、UCloud、OpenRouter 等服务。
+- **StepFun Step Plan**：直接读取官方 `step-*` 模型列表，支持 Step API Key、Step Plan 原生模型选择和控制台 Credit 额度查询。
 - **模型级 Relay 路由**：同一 Relay 账号池可按模型选择不同当前账号，支持 WebSocket 与流式 Responses 适配。
 - **主动额度管理**：独立展示 5H/周额度、Spark、Luna Reserve、重置次数和周期状态，并按接口真实窗口识别 5H/7D。
 - **稳定的长任务代理**：提供 SSE bootstrap、流中错误检测、30 秒 keep-alive、WebSocket 双向桥接、session affinity 与 prompt cache 隔离。

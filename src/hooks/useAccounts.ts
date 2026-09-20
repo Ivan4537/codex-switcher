@@ -117,6 +117,7 @@ export interface Account {
     relay_usage_cookie?: string | null;
     relay_usage_cache?: RelayUsageCache | null;
     relay_model_map?: Record<string, string> | null;
+    relay_model_catalog?: string[];
     relay_model_fallback?: string | null;
     relay_protocol?: string | null;
     /** 业务分类：aggregator (中转) / coding_plan / third_party (API) */

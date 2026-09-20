@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
     formatReferralReward,
+    hasKnownReferralReward,
     referralProgramLabel,
-    referralCapacity,
+    referralRewardCapacity,
+    referralSendCapacity,
     type ReferralOffer,
     type ReferralProgram,
 } from './referral';
@@ -40,7 +42,9 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
         return () => { generation.current++; };
     }, [refresh]);
 
-    const capacity = referralCapacity(offer);
+    const capacity = referralSendCapacity(offer);
+    const rewardCapacity = referralRewardCapacity(offer);
+    const knownReward = hasKnownReferralReward(offer);
     const showOffer = offer?.should_show === true;
 
     return (
@@ -76,7 +80,7 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
                                 <strong>{formatReferralReward(offer)}</strong>
                             </div>
                             <div className="referral-quota-remaining">
-                                <span className="referral-quota-label">还能邀请</span>
+                                <span className="referral-quota-label">可发送邮箱</span>
                                 <strong>{capacity} 人</strong>
                             </div>
                         </div>
@@ -85,7 +89,10 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
                             <span>奖励名额 {offer.remaining_reward_capacity ?? '未提供'}</span>
                         </div>
                         <p className="referral-quota-note">
-                            活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。
+                            {!knownReward
+                                ? '接口未提供实际奖励金额，不能根据活动编号推断奖励数额。'
+                                : '活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。'}
+                            {rewardCapacity === 0 && ' 当前奖励名额为 0，已禁止发送邀请。'}
                         </p>
                     </>
                 ) : (

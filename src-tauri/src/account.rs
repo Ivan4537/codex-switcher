@@ -390,7 +390,7 @@ pub struct Account {
     #[serde(default)]
     pub relay_usage_preset: Option<String>,
 
-    /// Relay usage 专用网页登录 Cookie（MiMo Token Plan 等控制台配额接口使用）。
+    /// Relay usage 专用网页登录凭证（MiMo Cookie、StepFun Oasis-Token 等控制台配额接口使用）。
     /// 不参与模型请求，只用于 `relay_usage_preset` 对应的配额 fetcher。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_usage_cookie: Option<String>,
@@ -403,6 +403,11 @@ pub struct Account {
     /// 仅 Relay 类型生效；空映射 = 透传不替换。
     #[serde(default)]
     pub relay_model_map: Option<std::collections::HashMap<String, String>>,
+
+    /// Relay 上游返回的原生模型目录。用于 Step Plan 等需要在 Codex 模型列表中
+    /// 展示上游模型的 Chat Completions 套餐；空值表示尚未刷新。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_model_catalog: Vec<String>,
 
     /// 模型映射兜底：当 `relay_model_map` 不命中时统一替换成此值；None=透传。
     #[serde(default)]
@@ -793,6 +798,9 @@ impl AccountStore {
         if store.migrate_glm_usage_preset() {
             let _ = store.save();
         }
+        if store.migrate_stepfun_plan_native_models() {
+            let _ = store.save();
+        }
         if store.migrate_mimo_plan_manage_homepage() {
             let _ = store.save();
         }
@@ -950,6 +958,12 @@ impl AccountStore {
                 "accounts/fireworks/models/kimi-k2-instruct",
             ),
             (
+                "stepfun_plan",
+                "https://api.stepfun.com/step_plan/v1",
+                "chat_completions",
+                "step-5-preview",
+            ),
+            (
                 "stepfun_step",
                 "https://api.stepfun.com/v1",
                 "chat_completions",
@@ -1092,7 +1106,8 @@ impl AccountStore {
             let base = acc.relay_base_url.as_deref().unwrap_or("").to_lowercase();
             let base_says_coding_plan = base.contains("xiaomimimo.com")
                 || base.contains("bigmodel.cn/api/coding")
-                || base.contains("token-plan");
+                || base.contains("token-plan")
+                || base.contains("stepfun.com/step_plan");
 
             let category = if base_says_coding_plan {
                 "coding_plan"
@@ -1100,6 +1115,7 @@ impl AccountStore {
                 match preset_id.as_deref() {
                     Some("glm_coding")
                     | Some("mimo_token_plan_sgp")
+                    | Some("stepfun_plan")
                     | Some("volcengine_ark")
                     | Some("ucloud_modelverse") => "coding_plan",
                     Some("generic_responses_relay") | Some("freemodel") | Some("custom") => {
@@ -1202,6 +1218,41 @@ impl AccountStore {
                 changed = true;
                 println!(
                     "[Migration] GLM 账号 {} 补默认 model_fallback=glm-5.1",
+                    acc.name
+                );
+            }
+        }
+        changed
+    }
+
+    /// 一次性迁移：Step Plan 改为直接使用官方 `/models` 返回的原生模型。
+    /// 旧版预设曾把 gpt-* 写入 relay_model_map / relay_model_fallback，
+    /// 会导致用户选中的 step-* 模型再次被强制改回固定模型。
+    fn migrate_stepfun_plan_native_models(&mut self) -> bool {
+        let mut changed = false;
+        for acc in self.accounts.values_mut() {
+            if !matches!(acc.kind, AccountKind::Relay) {
+                continue;
+            }
+            let is_stepfun_plan = acc.relay_usage_preset.as_deref() == Some("stepfun_plan")
+                || acc
+                    .relay_base_url
+                    .as_deref()
+                    .is_some_and(|base| base.contains("stepfun.com/step_plan"));
+            if !is_stepfun_plan {
+                continue;
+            }
+            let mut account_changed = false;
+            if acc.relay_model_map.take().is_some() {
+                account_changed = true;
+            }
+            if acc.relay_model_fallback.take().is_some() {
+                account_changed = true;
+            }
+            if account_changed {
+                changed = true;
+                println!(
+                    "[Migration] StepFun Step Plan 账号 {} 改为使用官方原生模型列表",
                     acc.name
                 );
             }
@@ -1346,6 +1397,7 @@ impl AccountStore {
             relay_usage_cookie: None,
             relay_usage_cache: None,
             relay_model_map: None,
+            relay_model_catalog: Vec::new(),
             relay_model_fallback: None,
             relay_protocol: None,
             relay_category: None,
@@ -1413,6 +1465,7 @@ impl AccountStore {
             relay_usage_cookie: usage_cookie,
             relay_usage_cache: None,
             relay_model_map: model_map,
+            relay_model_catalog: Vec::new(),
             relay_model_fallback: model_fallback,
             relay_protocol,
             relay_category,
@@ -1462,6 +1515,7 @@ impl AccountStore {
             relay_usage_cookie: None,
             relay_usage_cache: None,
             relay_model_map: None,
+            relay_model_catalog: Vec::new(),
             relay_model_fallback: None,
             relay_protocol: None,
             relay_category: None,

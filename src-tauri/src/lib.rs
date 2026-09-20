@@ -598,7 +598,7 @@ fn set_account_window_priming(
     Ok(())
 }
 
-/// 更新 Relay usage 专用 Cookie（MiMo Token Plan 等控制台配额接口使用）。
+/// 更新 Relay usage 专用网页登录凭证（MiMo Cookie、StepFun Oasis-Token 等控制台配额接口使用）。
 #[tauri::command]
 fn update_relay_usage_cookie(
     state: State<AppState>,
@@ -887,6 +887,47 @@ async fn add_relay_account(
     Ok(account)
 }
 
+/// 从 Relay 的 OpenAI-compatible `/models` 接口刷新原生模型目录。
+#[tauri::command]
+async fn refresh_relay_models(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    let (base, api_key) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store.accounts.get(&id).ok_or("账号不存在")?;
+        if !account.is_relay() {
+            return Err("不是中转站账号".to_string());
+        }
+        (
+            account
+                .relay_base_url
+                .clone()
+                .ok_or("中转站账号缺 base_url")?,
+            AccountStore::extract_access_token(&account.auth_json).ok_or("中转站账号缺 api_key")?,
+        )
+    };
+
+    let models = relay_catalog::fetch_models(crate::usage::usage_client(), &base, &api_key).await?;
+    {
+        let mut store = state.store.lock().map_err(|e| e.to_string())?;
+        let account = store
+            .accounts
+            .get_mut(&id)
+            .ok_or("账号在刷新模型时被删除")?;
+        if account.relay_base_url.as_deref() != Some(base.as_str())
+            || AccountStore::extract_access_token(&account.auth_json).as_deref()
+                != Some(api_key.as_str())
+        {
+            return Err("账号在刷新模型时发生变化".to_string());
+        }
+        account.relay_model_catalog = models.clone();
+        relay_catalog::ensure_currents(&mut store);
+        store.save()?;
+    }
+    Ok(models)
+}
+
 /// 更新 Relay 账号的模型映射 / 兜底 / 上游协议（编辑功能用）。
 #[tauri::command]
 fn update_relay_model_map(
@@ -984,6 +1025,11 @@ async fn refresh_relay_usage(
             let cookie = usage_cookie
                 .ok_or("MiMo 配额查询需要登录 platform.xiaomimimo.com 后复制 Cookie header")?;
             UsageFetcher::fetch_relay_usage_mimo_token_plan(&cookie).await?
+        }
+        Some("stepfun_plan") => {
+            let token = usage_cookie
+                .ok_or("StepFun 额度查询需要登录 platform.stepfun.com 后复制 Oasis-Token")?;
+            UsageFetcher::fetch_relay_usage_stepfun_plan(&token).await?
         }
         Some(other) => return Err(format!("未支持的 usage_preset: {}", other)),
         None => return Err("usage 策略未确定".to_string()),
@@ -2477,7 +2523,9 @@ pub fn start_quota_refresh(
                                         for e in &entries {
                                             if let Some(acc) = s.accounts.get_mut(&e.id) {
                                                 if let Some(mut q) = e.cached_quota.clone() {
-                                                    if let Some(previous) = acc.cached_quota.as_ref() {
+                                                    if let Some(previous) =
+                                                        acc.cached_quota.as_ref()
+                                                    {
                                                         q.preserve_credits_from(previous);
                                                     }
                                                     acc.cached_quota = Some(q);
@@ -5685,10 +5733,9 @@ async fn remote_pull_all(state: State<'_, AppState>) -> Result<usize, String> {
     let mut store = state.store.lock().map_err(|e| e.to_string())?;
     for mut ra in remote_accounts {
         if let Some(previous) = store.accounts.get(&ra.id) {
-            if let (Some(previous_quota), Some(incoming_quota)) = (
-                previous.cached_quota.as_ref(),
-                ra.cached_quota.as_mut(),
-            ) {
+            if let (Some(previous_quota), Some(incoming_quota)) =
+                (previous.cached_quota.as_ref(), ra.cached_quota.as_mut())
+            {
                 incoming_quota.preserve_credits_from(previous_quota);
             }
         }
@@ -6318,6 +6365,7 @@ pub fn run() {
             export_accounts,
             import_accounts,
             add_relay_account,
+            refresh_relay_models,
             update_relay_model_map,
             refresh_relay_usage,
             bulk_import_accounts,
@@ -6467,6 +6515,7 @@ mod tests {
             relay_usage_cookie: None,
             relay_usage_cache: None,
             relay_model_map: None,
+            relay_model_catalog: Vec::new(),
             relay_model_fallback: None,
             relay_protocol: None,
             relay_category: None,

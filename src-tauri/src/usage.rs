@@ -1093,6 +1093,242 @@ impl UsageFetcher {
         })
     }
 
+    /// StepFun Step Plan quota：平台控制台的 Dashboard RPC。
+    ///
+    /// Step Plan 的 API Key 只负责模型调用；官方额度接口
+    /// `QueryStepPlanRateLimit` 走 platform.stepfun.com 的网页登录态，使用
+    /// `Oasis-Token`。这里接受两种输入：直接粘贴 token，或粘贴包含
+    /// `Oasis-Token=...` 的 Cookie header。不会把该 token 放进模型请求。
+    pub async fn fetch_relay_usage_stepfun_plan(
+        console_token_or_cookie: &str,
+    ) -> Result<crate::account::RelayUsageCache, String> {
+        let token =
+            Self::normalize_stepfun_console_token(console_token_or_cookie).ok_or_else(|| {
+                "StepFun 额度查询需要 platform.stepfun.com 的 Oasis-Token".to_string()
+            })?;
+        let url = "https://platform.stepfun.com/api/step.openapi.devcenter.Dashboard/QueryStepPlanRateLimit";
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Oasis-Token", token)
+            .header("Oasis-AppID", "10300")
+            .header("Oasis-Platform", "web")
+            .header("Origin", "https://platform.stepfun.com")
+            .header("Referer", "https://platform.stepfun.com/plan-subscribe")
+            .timeout(std::time::Duration::from_secs(15))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|e| format!("StepFun 额度请求失败: {}", e))?;
+        let status = resp.status();
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("StepFun 额度 JSON 解析失败: {}", e))?;
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(
+                "StepFun 控制台 Token 已失效，请重新登录 platform.stepfun.com 后复制 Oasis-Token"
+                    .to_string(),
+            );
+        }
+        if !status.is_success() {
+            let desc = Self::stepfun_field(&body, "desc", "desc")
+                .and_then(Value::as_str)
+                .unwrap_or("上游拒绝了额度查询");
+            return Err(format!("HTTP {} @ {} → {}", status.as_u16(), url, desc));
+        }
+        Self::parse_stepfun_rate_limit_response(&body)
+    }
+
+    fn normalize_stepfun_console_token(raw: &str) -> Option<String> {
+        let mut text = raw.trim();
+        let lower = text.to_ascii_lowercase();
+        if let Some(idx) = lower.find("cookie:") {
+            text = &text[idx + "cookie:".len()..];
+        } else if let Some(idx) = lower.find("oasis-token:") {
+            text = &text[idx + "oasis-token:".len()..];
+        }
+        if let Some(line) = text.lines().next() {
+            text = line;
+        }
+        let text = text
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`' || c == '\\');
+        for pair in text.split(';') {
+            let Some((name, value)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("Oasis-Token") {
+                let value = value.trim().trim_matches(|c| c == '\'' || c == '"');
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        if !text.contains('=') && !text.is_empty() {
+            return Some(text.to_string());
+        }
+        None
+    }
+
+    fn stepfun_field<'a>(value: &'a Value, snake: &str, camel: &str) -> Option<&'a Value> {
+        value.get(snake).or_else(|| value.get(camel))
+    }
+
+    fn stepfun_timestamp(value: Option<&Value>) -> Option<i64> {
+        let timestamp = value.and_then(Self::parse_number)?.round() as i64;
+        if timestamp > 20_000_000_000 {
+            Some(timestamp / 1000)
+        } else {
+            Some(timestamp)
+        }
+    }
+
+    fn stepfun_rate_percent(value: Option<&Value>) -> Option<f64> {
+        let rate = Self::parse_number(value?)?;
+        if !rate.is_finite() {
+            return None;
+        }
+        Some(if rate <= 1.0 { rate * 100.0 } else { rate }.clamp(0.0, 100.0))
+    }
+
+    fn parse_stepfun_rate_limit_response(
+        body: &Value,
+    ) -> Result<crate::account::RelayUsageCache, String> {
+        use crate::account::RelayQuotaWindow;
+
+        let credit_limit =
+            Self::stepfun_field(body, "plan_credit_rate_limit", "planCreditRateLimit");
+        let mut windows = Vec::new();
+        if let Some(buckets) = credit_limit
+            .and_then(|value| Self::stepfun_field(value, "credit_buckets", "creditBuckets"))
+            .and_then(Value::as_array)
+        {
+            for bucket in buckets {
+                let total = Self::stepfun_field(bucket, "credit_total", "creditTotal")
+                    .and_then(Self::parse_number);
+                let residual = Self::stepfun_field(bucket, "credit_residual", "creditResidual")
+                    .and_then(Self::parse_number);
+                let remaining_percent = match (total, residual) {
+                    (Some(total), Some(residual)) if total > 0.0 => {
+                        Some((residual / total * 100.0).clamp(0.0, 100.0))
+                    }
+                    _ => None,
+                };
+                let bucket_type = Self::stepfun_field(bucket, "type", "type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let label = if bucket_type.contains("TOPUP") || bucket_type == "2" {
+                    "加油包 Credit"
+                } else {
+                    "订阅 Credit"
+                };
+                let reset_at = Self::stepfun_timestamp(
+                    Self::stepfun_field(bucket, "next_reset_at", "nextResetAt")
+                        .or_else(|| Self::stepfun_field(bucket, "expire_at", "expireAt")),
+                );
+                if remaining_percent.is_some() {
+                    windows.push(RelayQuotaWindow {
+                        label: label.to_string(),
+                        remaining_percent,
+                        reset_at,
+                    });
+                }
+            }
+        }
+
+        if windows.is_empty() {
+            if let Some(rate) = Self::stepfun_rate_percent(credit_limit.and_then(|value| {
+                Self::stepfun_field(
+                    value,
+                    "subscription_credit_left_rate",
+                    "subscriptionCreditLeftRate",
+                )
+            })) {
+                windows.push(RelayQuotaWindow {
+                    label: "订阅 Credit".to_string(),
+                    remaining_percent: Some(rate),
+                    reset_at: Self::stepfun_timestamp(credit_limit.and_then(|value| {
+                        Self::stepfun_field(
+                            value,
+                            "subscription_credit_reset_time",
+                            "subscriptionCreditResetTime",
+                        )
+                    })),
+                });
+            }
+            if let Some(rate) = Self::stepfun_rate_percent(credit_limit.and_then(|value| {
+                Self::stepfun_field(value, "topup_credit_left_rate", "topupCreditLeftRate")
+            })) {
+                windows.push(RelayQuotaWindow {
+                    label: "加油包 Credit".to_string(),
+                    remaining_percent: Some(rate),
+                    reset_at: None,
+                });
+            }
+        }
+
+        if windows.is_empty() {
+            let five_hour = Self::stepfun_rate_percent(Self::stepfun_field(
+                body,
+                "five_hour_usage_left_rate",
+                "fiveHourUsageLeftRate",
+            ));
+            let weekly = Self::stepfun_rate_percent(Self::stepfun_field(
+                body,
+                "weekly_usage_left_rate",
+                "weeklyUsageLeftRate",
+            ));
+            if let Some(rate) = five_hour {
+                windows.push(RelayQuotaWindow {
+                    label: "5H".to_string(),
+                    remaining_percent: Some(rate),
+                    reset_at: Self::stepfun_timestamp(Self::stepfun_field(
+                        body,
+                        "five_hour_usage_reset_time",
+                        "fiveHourUsageResetTime",
+                    )),
+                });
+            }
+            if let Some(rate) = weekly {
+                windows.push(RelayQuotaWindow {
+                    label: "7D".to_string(),
+                    remaining_percent: Some(rate),
+                    reset_at: Self::stepfun_timestamp(Self::stepfun_field(
+                        body,
+                        "weekly_usage_reset_time",
+                        "weeklyUsageResetTime",
+                    )),
+                });
+            }
+        }
+
+        let remaining = windows
+            .iter()
+            .filter_map(|window| window.remaining_percent)
+            .reduce(f64::min)
+            .ok_or_else(|| {
+                let desc = Self::stepfun_field(body, "desc", "desc")
+                    .and_then(Value::as_str)
+                    .unwrap_or("响应中没有可识别的 Step Plan 额度字段");
+                format!("StepFun 额度解析失败: {}", desc)
+            })?;
+        let next_reset_at = windows.iter().filter_map(|window| window.reset_at).min();
+        let is_active = windows
+            .iter()
+            .any(|window| window.remaining_percent.is_some_and(|value| value > 0.0));
+        Ok(crate::account::RelayUsageCache {
+            windows,
+            remaining,
+            unit: "% Step Plan Credit".to_string(),
+            is_active,
+            next_reset_at,
+            updated_at: chrono::Utc::now(),
+        })
+    }
+
     async fn fetch_mimo_console_json(
         client: &reqwest::Client,
         url: &str,
@@ -1949,5 +2185,57 @@ mod tests {
             UsageFetcher::parse_mimo_period_end("2026-05-04 23:59:59"),
             Some(1_777_939_199)
         );
+    }
+
+    #[test]
+    fn stepfun_token_normalizer_accepts_raw_token_or_cookie() {
+        assert_eq!(
+            UsageFetcher::normalize_stepfun_console_token("raw-step-token"),
+            Some("raw-step-token".to_string())
+        );
+        assert_eq!(
+            UsageFetcher::normalize_stepfun_console_token(
+                "Cookie: foo=bar; Oasis-Token=console-token; baz=qux"
+            ),
+            Some("console-token".to_string())
+        );
+        assert!(UsageFetcher::normalize_stepfun_console_token("Cookie: foo=bar").is_none());
+    }
+
+    #[test]
+    fn stepfun_rate_limit_parser_reads_credit_buckets() {
+        let body = json!({
+            "planCreditRateLimit": {
+                "creditBuckets": [
+                    {"type": "SUBSCRIPTION", "creditTotal": 400000000, "creditResidual": 300000000, "nextResetAt": 1790000000},
+                    {"type": "TOPUP", "creditTotal": "160000000", "creditResidual": "80000000", "expireAt": 1791000000}
+                ]
+            }
+        });
+        let cache = UsageFetcher::parse_stepfun_rate_limit_response(&body).unwrap();
+        assert_eq!(cache.windows.len(), 2);
+        assert_eq!(cache.windows[0].label, "订阅 Credit");
+        assert_eq!(cache.windows[0].remaining_percent, Some(75.0));
+        assert_eq!(cache.windows[1].label, "加油包 Credit");
+        assert_eq!(cache.windows[1].remaining_percent, Some(50.0));
+        assert_eq!(cache.remaining, 50.0);
+        assert_eq!(cache.next_reset_at, Some(1790000000));
+    }
+
+    #[test]
+    fn stepfun_rate_limit_parser_falls_back_to_5h_and_weekly() {
+        let body = json!({
+            "fiveHourUsageLeftRate": 0.8,
+            "fiveHourUsageResetTime": 1790000000000i64,
+            "weeklyUsageLeftRate": 35,
+            "weeklyUsageResetTime": 1791000000
+        });
+        let cache = UsageFetcher::parse_stepfun_rate_limit_response(&body).unwrap();
+        assert_eq!(cache.windows[0].label, "5H");
+        assert_eq!(cache.windows[0].remaining_percent, Some(80.0));
+        assert_eq!(cache.windows[0].reset_at, Some(1790000000));
+        assert_eq!(cache.windows[1].label, "7D");
+        assert_eq!(cache.windows[1].remaining_percent, Some(35.0));
+        assert_eq!(cache.remaining, 35.0);
     }
 }

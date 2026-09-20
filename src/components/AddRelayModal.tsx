@@ -139,7 +139,9 @@ function Step2Form(props: Step2Props) {
         advOpen, setAdvOpen, onChangeProvider,
     } = props;
 
-    const needsCookie = usagePreset === 'mimo_token_plan';
+    const needsCookie = usagePreset === 'mimo_token_plan' || usagePreset === 'stepfun_plan';
+    const cookieProvider = usagePreset === 'stepfun_plan' ? 'StepFun' : 'MiMo';
+    const isStepFunPlan = preset.id === 'stepfun_plan';
     const keyPlaceholder = `${preset.auth_prefix ?? 'sk-'}••••••••`;
 
     return (
@@ -152,6 +154,9 @@ function Step2Form(props: Step2Props) {
                         <ProtocolBadge proto={protocol} />
                     </div>
                     <div className="cs-selected-card__url">{baseUrl || '（自定义 base URL）'}</div>
+                    {isStepFunPlan && (
+                        <div className="cs-rfield__hint">保存后直接读取 StepFun /models 返回的原生 step-* 模型，在 Codex 模型列表中选择。</div>
+                    )}
                     {protocol === 'responses' && modelFallback && (
                         <div className="cs-rfield__hint">保存后可在 Codex 中选择此中转的模型，无需切换 ChatGPT 账号。</div>
                     )}
@@ -249,6 +254,7 @@ function Step2Form(props: Step2Props) {
                         <option value="glm_zhipu">glm_zhipu · GLM 自家 quota</option>
                         <option value="kimi_coding">kimi_coding · Kimi 编程套餐 5H / 7D</option>
                         <option value="mimo_token_plan">mimo_token_plan · 需 Cookie</option>
+                        <option value="stepfun_plan">stepfun_plan · Step Plan 控制台 Token</option>
                         <option value="">不拉取</option>
                     </select>
                 </div>
@@ -256,8 +262,12 @@ function Step2Form(props: Step2Props) {
                 {needsCookie && (
                     <div className="cs-rfield cs-rfield--full">
                         <label className="cs-rfield__label" htmlFor="cs-relay-cookie">
-                            MiMo 配额 Cookie
-                            <span className="cs-rfield__hint">从 platform.xiaomimimo.com Network 复制 Cookie header</span>
+                            {cookieProvider} 额度凭证
+                            <span className="cs-rfield__hint">
+                                {usagePreset === 'stepfun_plan'
+                                    ? '从 platform.stepfun.com Cookie 复制 Oasis-Token，或直接粘贴 token'
+                                    : '从 platform.xiaomimimo.com Network 复制 Cookie header'}
+                            </span>
                         </label>
                         <textarea
                             id="cs-relay-cookie"
@@ -265,7 +275,9 @@ function Step2Form(props: Step2Props) {
                             rows={3}
                             value={usageCookie}
                             onChange={(e) => setUsageCookie(e.target.value)}
-                            placeholder="Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=..."
+                            placeholder={usagePreset === 'stepfun_plan'
+                                ? 'Oasis-Token=...（或直接粘贴 token）'
+                                : 'Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=...'}
                             style={{ resize: 'vertical', fontSize: 12 }}
                         />
                     </div>
@@ -282,10 +294,15 @@ function Step2Form(props: Step2Props) {
                         size={14}
                         className={`cs-radv__chevron${advOpen ? ' cs-radv__chevron--open' : ''}`}
                     />
-                    高级设置（模型兜底 / 映射表）
+                    {isStepFunPlan ? '模型来源' : '高级设置（模型兜底 / 映射表）'}
                 </button>
                 {advOpen && (
                     <div className="cs-radv__body">
+                        {isStepFunPlan ? (
+                            <div className="cs-rfield cs-rfield--full">
+                                <span className="cs-rfield__hint">Step Plan 不使用模型映射；模型列表由官方 API 返回，保存后刷新 Codex 模型列表即可。</span>
+                            </div>
+                        ) : <>
                         {protocol !== 'responses' && <div className="cs-rfield">
                             <label className="cs-rfield__label" htmlFor="cs-relay-fallback">
                                 模型兜底
@@ -314,6 +331,7 @@ function Step2Form(props: Step2Props) {
                                 style={{ resize: 'vertical', fontSize: 12 }}
                             />
                         </div>
+                        </>}
                     </div>
                 )}
             </div>
@@ -398,14 +416,16 @@ export function AddRelayModal({ isOpen, onClose, onSuccess }: AddRelayModalProps
         // Ollama 等本地推理不需要真 key，宽松校验：非空 + ≥1 字符即可。
         // 真的 sk- / tp- key 通常 ≥30 字符，这里不卡死方便本地场景。
         if (apiKey.trim().length < 1) { setError('API Key 不能为空'); return; }
-        if (usagePreset === 'mimo_token_plan' && !usageCookie.trim()) {
-            setError('MiMo 配额查询需要粘贴 platform.xiaomimimo.com 的 Cookie；不查配额请把策略改成「不拉取」。');
+        if ((usagePreset === 'mimo_token_plan' || usagePreset === 'stepfun_plan') && !usageCookie.trim()) {
+            setError(usagePreset === 'stepfun_plan'
+                ? 'StepFun 额度查询需要粘贴 platform.stepfun.com 的 Oasis-Token；不查配额请把策略改成「不拉取」。'
+                : 'MiMo 配额查询需要粘贴 platform.xiaomimimo.com 的 Cookie；不查配额请把策略改成「不拉取」。');
             return;
         }
         setSubmitting(true);
         try {
             const modelMap = parseModelMapText(modelMapText);
-            await invoke('add_relay_account', {
+            const account = await invoke<{ id: string }>('add_relay_account', {
                 name: name.trim(),
                 baseUrl: baseUrl.trim(),
                 apiKey: apiKey.trim(),
@@ -418,6 +438,9 @@ export function AddRelayModal({ isOpen, onClose, onSuccess }: AddRelayModalProps
                 relayProtocol: protocol === 'responses' ? null : protocol,
                 relayCategory: picked.category ?? 'aggregator',
             });
+            if (picked.id === 'stepfun_plan') {
+                await invoke('refresh_relay_models', { id: account.id });
+            }
             await emit('accounts-updated');
             onSuccess?.();
             onClose();

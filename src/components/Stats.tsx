@@ -4,6 +4,7 @@ import {
     AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
     XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
+import { formatPlanLabel } from '../utils/planLabel';
 import './Stats.css';
 
 interface TokenHistoryEntry {
@@ -301,7 +302,7 @@ export function Stats() {
                                             {acc.is_current && <span className="quota-badge current">当前</span>}
                                             {acc.is_banned && <span className="quota-badge banned">封</span>}
                                             {acc.is_token_invalid && <span className="quota-badge invalid">失效</span>}
-                                            <span className={`quota-plan plan-${(acc.plan_type || 'unknown').toLowerCase()}`}>{acc.plan_type || '—'}</span>
+                                            <span className={`quota-plan plan-${(acc.plan_type || 'unknown').toLowerCase()}`}>{formatPlanLabel(acc.plan_type) || '—'}</span>
                                             <span className="acct-email-text">{acc.email}</span>
                                         </span>
                                         <CellPair cycle={acc.current_5h} />

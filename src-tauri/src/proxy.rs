@@ -1869,15 +1869,10 @@ async fn handle_named_relay_response(
     state: Arc<ProxyState>,
     method: Method,
     path: &str,
+    req_headers: hyper::HeaderMap,
     body: Bytes,
     slug: &str,
 ) -> Response<ProxyBody> {
-    if method != Method::POST || !path.split('?').next().unwrap_or("").ends_with("/responses") {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Selected relay model requires the Responses API",
-        );
-    }
     let target = state.store.lock().ok().and_then(|s| {
         let model = crate::relay_catalog::resolve(&s, slug)?;
         let account = s.accounts.get(&model.account_id)?;
@@ -1885,15 +1880,61 @@ async fn handle_named_relay_response(
             model,
             account.relay_base_url.clone()?,
             AccountStore::extract_access_token(&account.auth_json)?,
+            account.relay_protocol_or_default().to_string(),
         ))
     });
-    let Some((model, base, key)) = target else {
+    let Some((model, base, key, protocol)) = target else {
         // Never silently send a removed/disabled relay model to the ChatGPT account.
         return error_response(
             StatusCode::BAD_REQUEST,
             "Selected relay model is unavailable; check its account, API key and protocol",
         );
     };
+    if protocol == "chat_completions" {
+        if method != Method::POST || !path.split('?').next().unwrap_or("").ends_with("/responses") {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Selected chat relay model requires the Responses API",
+            );
+        }
+        let mut value: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(value) => value,
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert("model".to_string(), serde_json::json!(model.upstream));
+        }
+        let body = match serde_json::to_vec(&value) {
+            Ok(body) => Bytes::from(body),
+            Err(error) => return error_response(StatusCode::BAD_REQUEST, &error.to_string()),
+        };
+        let Some(relay) = relay_route_for_account(&state, &model.account_id) else {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Selected chat relay account unavailable",
+            );
+        };
+        // body_for_routing 已经按原始 Content-Encoding 解压过；不要让下游
+        // Chat Completions 翻译器看到 zstd/gzip 头后再次解压同一份 JSON。
+        let mut relay_headers = req_headers;
+        relay_headers.remove(hyper::header::CONTENT_ENCODING);
+        relay_headers.remove(hyper::header::CONTENT_LENGTH);
+        return handle_chat_completions_relay(
+            state,
+            relay,
+            method,
+            path.to_string(),
+            relay_headers,
+            body,
+        )
+        .await;
+    }
+    if method != Method::POST || !path.split('?').next().unwrap_or("").ends_with("/responses") {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Selected relay model requires the Responses API",
+        );
+    }
     // Fresh headers: do not leak a ChatGPT bearer, account id, cookies or private
     // routing headers to a third-party API. Native Responses body/events pass through.
     let response =
@@ -3119,6 +3160,7 @@ async fn handle_request(
                 state,
                 method,
                 &path_and_query,
+                req_headers,
                 body_for_routing,
                 &model,
             )
@@ -7682,6 +7724,15 @@ fn build_chat_completions_url(base_url: &str) -> Option<(String, String)> {
     Some((format!("{}/chat/completions", trimmed), host))
 }
 
+fn is_stepfun_plan_base_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url.trim_end_matches('/')) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("api.stepfun.com")
+        && url.path().trim_end_matches('/') == "/step_plan/v1"
+}
+
 /// 把厂商自家 chat_completions 错误体翻译成 codex 能识别的标准 OpenAI 错误。
 ///
 /// codex CLI 收到 `/v1/responses` 4xx 时按 OpenAI 错误格式 `{error:{code,message,type}}`
@@ -8162,8 +8213,53 @@ async fn handle_chat_completions_relay(
 ) -> Response<ProxyBody> {
     let path_lc = path_and_query.split('?').next().unwrap_or("").to_string();
 
-    // GET /v1/models → 本地合成最小响应，不打上游
+    // Step Plan 有官方 OpenAI-compatible /models；直接返回它的原生 step-* 列表，
+    // 不把 gpt-* 别名映射成固定模型。其它 chat relay 仍保留本地最小兜底。
     if method == hyper::Method::GET && (path_lc == "/v1/models" || path_lc.ends_with("/models")) {
+        if is_stepfun_plan_base_url(relay.base_url.as_deref().unwrap_or("")) {
+            let base = relay
+                .base_url
+                .as_deref()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let upstream_url = format!("{}/models", base);
+            let host = match url::Url::parse(base)
+                .ok()
+                .and_then(|url| url.host_str().map(String::from))
+            {
+                Some(host) => host,
+                None => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "StepFun base_url 无法解析 host",
+                    )
+                }
+            };
+            let mut headers = build_chat_relay_upstream_headers(&host);
+            let api_key = relay.api_key.clone().unwrap_or_default();
+            if !api_key.is_empty() {
+                if let Ok(value) =
+                    reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
+                {
+                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                }
+            }
+            match state
+                .client
+                .get(&upstream_url)
+                .headers(headers)
+                .send()
+                .await
+            {
+                Ok(response) => return build_stream_response(response, None, None),
+                Err(error) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("StepFun /models 请求失败: {}", error),
+                    )
+                }
+            }
+        }
         let default_model = relay
             .model_fallback
             .clone()

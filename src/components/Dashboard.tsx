@@ -4,6 +4,7 @@ import { StatsBar } from './StatsBar';
 import { UsageCard } from './UsageCard';
 import { ReferralQuotaCard } from './ReferralQuotaCard';
 import { referralProgramForPlan } from './referral';
+import { formatPlanLabel } from '../utils/planLabel';
 import './Dashboard.css';
 
 interface DashboardProps {
@@ -148,7 +149,7 @@ export function Dashboard({
                                 <span className="email-icon">✉</span>
                                 <span className="email">{currentAccount.name}</span>
                                 {usage?.plan_type && (
-                                    <span className="plan-badge">{usage.plan_type.toUpperCase()}</span>
+                                    <span className="plan-badge">{formatPlanLabel(usage.plan_type)}</span>
                                 )}
                             </div>
 

@@ -6,6 +6,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { AntigravityQuota, type AntigravityModelQuota } from './AntigravityQuota';
 import { AgyRelayModelQuotas, RelayQuotaWindows } from './RelayQuotaWindows';
 import { relayCurrentState } from '../utils/relayCurrent';
+import { formatPlanLabel } from '../utils/planLabel';
 import { ReferralInviteModal } from './ReferralInviteModal';
 import { referralProgramForPlan, type ReferralProgram } from './referral';
 
@@ -727,7 +728,7 @@ export function AccountList({
             setCookieEditor(null);
             await handleRefreshOne(id);
         } catch (e) {
-            setPushToast({ type: 'error', text: `保存 MiMo Cookie 失败: ${e}` });
+            setPushToast({ type: 'error', text: `保存额度凭证失败: ${e}` });
             setTimeout(() => setPushToast(null), 4000);
         } finally {
             setSavingCookie(false);
@@ -738,13 +739,16 @@ export function AccountList({
     /// - unit 是 `%` → 进度条 mini-card（GLM 这种百分比模型）
     /// - 其它（USD/CNY 等金额） → 纯文本 mini-card（unity2 等返回金额的）
     const RelayQuotaItem = ({ account, cache }: { account: Account; cache: RelayUsageCache | undefined }) => {
-        const isMiMoRelay = [
+        const isQuotaCookieRelay = [
             account.relay_usage_preset,
             account.relay_base_url,
             account.relay_homepage,
             account.name,
-        ].some(v => (v ?? '').toLowerCase().includes('mimo') || (v ?? '').toLowerCase().includes('xiaomimimo'));
-        const canEditCookie = isMiMoRelay;
+        ].some(v => {
+            const value = (v ?? '').toLowerCase();
+            return value.includes('mimo') || value.includes('xiaomimimo') || value.includes('stepfun_plan');
+        });
+        const canEditCookie = isQuotaCookieRelay;
         const openCookieEditor = () => {
             if (!canEditCookie) return;
             setCookieEditor({
@@ -757,7 +761,7 @@ export function AccountList({
             ? {
                 role: 'button',
                 tabIndex: 0,
-                title: '点击修改 MiMo 配额 Cookie',
+                title: '点击修改额度查询凭证',
                 onClick: openCookieEditor,
                 onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
                     if (e.key === 'Enter' || e.key === ' ') {
@@ -834,12 +838,12 @@ export function AccountList({
         );
     };
 
-    const CreditsQuotaItem = ({ balance, hasCredits }: { balance?: number | null; hasCredits?: boolean }) => {
+    const CreditsQuotaItem = ({ balance }: { balance?: number | null }) => {
         const knownBalance = typeof balance === 'number' && Number.isFinite(balance);
-        const value = knownBalance
-            ? balance.toLocaleString(undefined, { maximumFractionDigits: 2 })
-            : hasCredits ? '未返回' : '未查询';
-        const tone = knownBalance ? (balance > 0 ? 'green' : 'red') : 'neutral';
+        // Credits 为 0 时不占用额度列空间；只有明确有可消费余额才展示。
+        if (!knownBalance || balance <= 0) return null;
+        const value = balance.toLocaleString(undefined, { maximumFractionDigits: 2 });
+        const tone = 'green';
         return (
             <div
                 className={`quota-mini-card credits ${tone}`}
@@ -1051,7 +1055,7 @@ export function AccountList({
                                         )}
                                         {isBanned ? <span className="badge banned" title="该账号已被 OpenAI 封禁">封号</span> : isLoggedOut ? <span className="badge logged-out" title="登录已失效，可能是 refresh_token 过期、被撤销或会话在其他设备结束">需重新登录</span> : isInvalid && <span className="badge expired" title="该账号 Token 已过期或失效">过期</span>}
                                         {expiry.badge && <span className={`badge account-expiry ${expiry.tone}`} title={expiry.title}>📅 {expiry.badge}</span>}
-                                        {usage?.plan_type && <span className="badge plan">{usage.plan_type.toUpperCase()}</span>}
+                                        {usage?.plan_type && <span className="badge plan">{formatPlanLabel(usage.plan_type)}</span>}
                                         {kind === 'chatgpt_oauth' && usage?.reset_credits == null && (
                                             <button type="button" className="badge reset-credits clickable"
                                                 title="上游未返回重置次数，不代表次数已清空。点击查询银行明细。"
@@ -1059,19 +1063,15 @@ export function AccountList({
                                                 🔄 次数未知
                                             </button>
                                         )}
-                                        {usage?.reset_credits != null && (
-                                            usage.reset_credits > 0 ? (
-                                                <span
-                                                    className={`badge reset-credits clickable${rateLimited ? ' limited' : ''}`}
-                                                    title={rateLimited
-                                                        ? '⚡ 当前已被限流（额度桶为 0）——现在用一次主动重置回收最大，点击查看明细'
-                                                        : '点击查看所有主动重置次数（含各自到期时间），再消耗一次重置限额窗口'}
-                                                    onClick={() => openResetModal(acc.id, acc.name, usage.reset_credits ?? 0)}
-                                                    style={{ cursor: 'pointer' }}
-                                                >{rateLimited ? '⚡' : ''}🔄 {usage.reset_credits}</span>
-                                            ) : (
-                                                <span className="badge reset-credits" title="主动重置次数（剩余 0 次，无法重置）">🔄 {usage.reset_credits}</span>
-                                            )
+                                        {usage?.reset_credits != null && usage.reset_credits > 0 && (
+                                            <span
+                                                className={`badge reset-credits clickable${rateLimited ? ' limited' : ''}`}
+                                                title={rateLimited
+                                                    ? '⚡ 当前已被限流（额度桶为 0）——现在用一次主动重置回收最大，点击查看明细'
+                                                    : '点击查看所有主动重置次数（含各自到期时间），再消耗一次重置限额窗口'}
+                                                onClick={() => openResetModal(acc.id, acc.name, usage.reset_credits ?? 0)}
+                                                style={{ cursor: 'pointer' }}
+                                            >{rateLimited ? '⚡' : ''}🔄 {usage.reset_credits}</span>
                                         )}
                                     </div>
                                 </div>
@@ -1101,7 +1101,7 @@ export function AccountList({
                                                 />
                                             )}
                                             {kind === 'chatgpt_oauth' && (
-                                                <CreditsQuotaItem balance={usage.credits_balance} hasCredits={usage.has_credits} />
+                                                <CreditsQuotaItem balance={usage.credits_balance} />
                                             )}
                                         </div>
                                     ) : kind === 'chatgpt_oauth' ? (
@@ -1389,9 +1389,13 @@ export function AccountList({
             {cookieEditor && (
                 <div className="modal-overlay" onClick={() => !savingCookie && setCookieEditor(null)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()}>
+                        {(() => {
+                            const cookieAccount = accounts.find(account => account.id === cookieEditor.id);
+                            const isStepFun = cookieAccount?.relay_usage_preset === 'stepfun_plan';
+                            return <>
                         <div className="modal-header">
                             <div className="header-top">
-                                <h2>修改 MiMo 配额 Cookie</h2>
+                                <h2>{isStepFun ? '修改 StepFun 额度凭证' : '修改 MiMo 配额 Cookie'}</h2>
                                 <button className="close-btn" onClick={() => setCookieEditor(null)} disabled={savingCookie}>
                                     ×
                                 </button>
@@ -1399,13 +1403,15 @@ export function AccountList({
                         </div>
                         <div className="modal-body">
                             <p className="modal-tip" style={{ marginBottom: 12 }}>
-                                账号：{cookieEditor.name}。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。
+                                {isStepFun
+                                    ? <>账号：{cookieEditor.name}。登录 <code>platform.stepfun.com</code> 后复制 <code>Oasis-Token</code>，也可粘贴包含它的 Cookie header。</>
+                                    : <>账号：{cookieEditor.name}。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。</>}
                             </p>
                             <textarea
                                 value={cookieEditor.value}
                                 onChange={e => setCookieEditor(prev => prev ? { ...prev, value: e.target.value } : prev)}
                                 rows={5}
-                                placeholder="Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=..."
+                                placeholder={isStepFun ? 'Oasis-Token=...（或直接粘贴 token）' : 'Cookie: api-platform_serviceToken=...; userId=...; api-platform_ph=...'}
                                 style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12, width: '100%' }}
                                 disabled={savingCookie}
                             />
@@ -1418,6 +1424,8 @@ export function AccountList({
                                 {savingCookie ? '保存中…' : '保存并刷新'}
                             </button>
                         </div>
+                            </>;
+                        })()}
                     </div>
                 </div>
             )}

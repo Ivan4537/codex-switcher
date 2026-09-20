@@ -36,7 +36,7 @@ export interface ReferralInvite {
     status?: string;
 }
 
-/** 活动展示的单人奖励；只有上游未返回 grants 时才使用已知 offer_id 兜底。 */
+/** 活动展示的单人奖励；没有真实 grants 时不根据 offer_id 猜测金额。 */
 export function formatReferralReward(offer: ReferralOffer): string {
     const grants = (offer.grants ?? []).filter(
         grant => grant.recipient === 'referrer' && (grant.amount ?? 0) > 0,
@@ -50,21 +50,31 @@ export function formatReferralReward(offer: ReferralOffer): string {
             return `${grant.amount?.toLocaleString()} ${unit}`;
         }).join(' + ');
     }
-    if (!offer.grants?.length) {
-        const amount = { credits_250: 250, credits_500: 500, credits_1000: 1000 }[offer.offer_id ?? ''];
-        if (amount) return `${amount.toLocaleString()} 个使用额度`;
-    }
     return '活动未提供奖励数额';
 }
 
-/** 可实际发送且仍有机会获得活动奖励的邮箱数量。 */
-export function referralCapacity(offer: ReferralOffer | null): number {
+/** 接口真实返回的奖励金额是否可确认。 */
+export function hasKnownReferralReward(offer: { grants?: ReferralGrant[] } | null): boolean {
+    return (offer?.grants ?? []).some(
+        grant => grant.recipient === 'referrer' && (grant.amount ?? 0) > 0,
+    );
+}
+
+/** 当前请求最多可发送的邮箱数量；不等同于奖励名额。 */
+export function referralSendCapacity(offer: ReferralOffer | null): number {
     if (!offer?.should_show) return 0;
     let capacity = Math.min(5, offer.remaining_send_capacity ?? 0);
-    if (offer.grants?.length || (offer.offer_id != null && offer.offer_id !== 'none')) {
-        capacity = Math.min(capacity, offer.remaining_reward_capacity ?? 0);
+    // 奖励名额明确为 0 时，禁止把“还能提交邀请”误解成“还能获得奖励”。
+    if (typeof offer.remaining_reward_capacity === 'number') {
+        capacity = Math.min(capacity, Math.max(0, offer.remaining_reward_capacity));
     }
     return Math.max(0, capacity);
+}
+
+/** 奖励名额是否明确为 0；null 表示接口没有提供该字段。 */
+export function referralRewardCapacity(offer: ReferralOffer | null): number | null {
+    if (!offer || typeof offer.remaining_reward_capacity !== 'number') return null;
+    return Math.max(0, offer.remaining_reward_capacity);
 }
 
 export interface ReferralTracking {

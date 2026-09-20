@@ -713,6 +713,17 @@ fn is_empty_value(v: &Value) -> bool {
     }
 }
 
+fn non_empty_function_parameters(value: Option<&Value>) -> Value {
+    match value {
+        Some(Value::Object(object)) if !object.is_empty() => Value::Object(object.clone()),
+        _ => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }),
+    }
+}
+
 fn normalize_tools(tools: &[Value]) -> Vec<Value> {
     let mut out = Vec::with_capacity(tools.len());
     for t in tools {
@@ -725,7 +736,7 @@ fn normalize_tools(tools: &[Value]) -> Vec<Value> {
                 "function": {
                     "name": t.get("name").cloned().unwrap_or(Value::Null),
                     "description": t.get("description").cloned().unwrap_or(Value::Null),
-                    "parameters": t.get("parameters").cloned().unwrap_or(Value::Null),
+                    "parameters": non_empty_function_parameters(t.get("parameters")),
                     "strict": t.get("strict").and_then(Value::as_bool).unwrap_or(false),
                 }
             }));
@@ -879,6 +890,23 @@ fn transform_tool(tool: Value, is_glm: bool, model: &str, out: &mut Vec<Value>) 
             if let Some(o) = t.as_object_mut() {
                 o.remove("strict");
             }
+            let Some(function) = t.get_mut("function").and_then(Value::as_object_mut) else {
+                return;
+            };
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if name.is_empty() {
+                eprintln!("[relay_translate] drop function tool without name");
+                return;
+            }
+            let parameters = function.get("parameters").cloned();
+            function.insert(
+                "parameters".to_string(),
+                non_empty_function_parameters(parameters.as_ref()),
+            );
             out.push(t);
         }
         "local_shell" => {
@@ -1174,9 +1202,9 @@ pub fn handle_chunk(state: &mut TranslatorState, chunk: &[u8]) -> Vec<Vec<u8>> {
                     "arguments": "",
                     "call_id": call_id,
                 });
-                if state.tool_wire_specs.is_some() {
-                    if let Some(name) = tc_delta.pointer("/function/name") {
-                        item_view["name"] = name.clone();
+                if let Some(name) = tc_delta.pointer("/function/name") {
+                    item_view["name"] = name.clone();
+                    if state.tool_wire_specs.is_some() {
                         state.restore_tool_item(&mut item_view);
                     }
                 }
@@ -2029,6 +2057,30 @@ mod tests {
             tools[0].get("strict").is_none(),
             "top-level strict must be removed after _transform_payload"
         );
+    }
+
+    #[test]
+    fn empty_function_parameters_are_normalized_for_chat_relays() {
+        let codex = json!({
+            "model": "step-5-preview",
+            "input": "hi",
+            "tools": [{
+                "type": "function",
+                "function": {"name": "probe", "parameters": {}}
+            }, {
+                "type": "function",
+                "name": "top_level_probe"
+            }]
+        });
+        let (body, _) =
+            translate_request(&serde_json::to_vec(&codex).unwrap(), "step-5-preview").unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        let tools = value["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        for tool in tools {
+            assert_eq!(tool["function"]["parameters"]["type"], "object");
+            assert!(tool["function"]["parameters"]["properties"].is_object());
+        }
     }
 
     #[test]

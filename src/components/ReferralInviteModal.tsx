@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
     formatReferralReward,
+    hasKnownReferralReward,
     referralProgramLabel,
-    referralCapacity,
+    referralRewardCapacity,
+    referralSendCapacity,
     type ReferralInvite,
     type ReferralOffer,
     type ReferralProgram,
@@ -58,7 +60,9 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
         finally { setTrackingLoading(false); }
     }
     const emails = [...new Map(input.split(/[\s,;]+/).filter(Boolean).map(e => [e.toLowerCase(), e])).values()];
-    const cap = referralCapacity(offer);
+    const cap = referralSendCapacity(offer);
+    const rewardCapacity = referralRewardCapacity(offer);
+    const knownReward = hasKnownReferralReward(offer);
     const valid = emails.length > 0 && emails.length <= cap && emails.every(e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
     const ready = valid && !!offer && (offer.requires_explicit_confirmation === false || confirmed);
     async function send() {
@@ -121,7 +125,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                                 <strong>{offer.should_show ? formatReferralReward(offer) : '当前账号暂未开放'}</strong>
                             </div>
                             {offer.should_show && <div className="referral-capacity-block">
-                                <span className="referral-stat-label">还能邀请</span>
+                                <span className="referral-stat-label">可发送邮箱</span>
                                 <strong>{cap}</strong>
                                 <span>人</span>
                             </div>}
@@ -130,7 +134,12 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <span>发送上限 {offer.remaining_send_capacity ?? '未提供'}</span>
                             <span>奖励名额 {offer.remaining_reward_capacity ?? '未提供'}</span>
                         </div>}
-                        <p className="referral-note">活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。</p>
+                        <p className="referral-note">
+                            {!knownReward
+                                ? '接口未提供实际奖励金额，不能根据活动编号推断为 500 或 1000。'
+                                : '活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。'}
+                            {rewardCapacity === 0 && ' 当前奖励名额为 0，已禁止发送邀请。'}
+                        </p>
                     </>}
                 </section>
 
@@ -140,7 +149,9 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <span className="referral-eyebrow">RECIPIENTS</span>
                             <h3>填写受邀邮箱</h3>
                         </div>
-                        {offer?.should_show && <span className="referral-section-hint">最多 {cap} 个</span>}
+                        {offer?.should_show && <span className="referral-section-hint">
+                            {rewardCapacity === 0 ? '奖励名额已用完' : `最多发送 ${cap} 个`}
+                        </span>}
                     </div>
                     <textarea
                         className="referral-email-input"
@@ -151,7 +162,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                         placeholder="每行一个邮箱，也可用逗号或分号分隔"
                         disabled={sending || submitted}
                     />
-                    {input && !valid && <p className="referral-validation" role="alert">请检查邮箱格式和本次可邀请人数（最多 {cap} 个）。</p>}
+                    {input && !valid && <p className="referral-validation" role="alert">请检查邮箱格式和本次可发送人数（最多 {cap} 个）。</p>}
                     {offer && offer.requires_explicit_confirmation !== false && <label className="referral-confirm">
                         <input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} disabled={sending || submitted} />
                         <span>我已确认收件人及奖励条件，发送邀请不代表奖励已到账。</span>

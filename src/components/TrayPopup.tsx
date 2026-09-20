@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { formatPlanLabel } from '../utils/planLabel';
 // Rust 端 on_window_event(Focused(false)) 负责隐藏弹窗
 import './TrayPopup.css';
 
@@ -188,7 +189,7 @@ export function TrayPopup() {
             {data?.account && (
                 <div className="tp-account">
                     {data.account.name}
-                    <span className="tp-plan">{q?.plan_type || '-'}</span>
+                    <span className="tp-plan">{formatPlanLabel(q?.plan_type) || '-'}</span>
                     {data.account.is_banned && <span className="tp-banned">封号</span>}
                     {data.account.is_logged_out && !data.account.is_banned && <span className="tp-logged-out">需重登</span>}
                     {data.account.is_token_invalid && !data.account.is_banned && !data.account.is_logged_out && <span className="tp-invalid">失效</span>}

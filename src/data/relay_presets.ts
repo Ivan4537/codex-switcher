@@ -6,6 +6,7 @@
  * `usage_preset` 字段命中后端 Rust 内置 fetcher 名（见 `usage.rs`）：
  *   - "openai_compat": GET {base}/v1/usage with Bearer
  *   - "mimo_token_plan": MiMo 控制台 Cookie → /api/v1/tokenPlan/usage
+ *   - "stepfun_plan": StepFun 控制台 Oasis-Token → QueryStepPlanRateLimit
  *   - null: 不拉余额（中转站没标准 usage 接口时用）
  *
  * 加新条目时：除非中转站确实暴露 OpenAI 兼容的 /v1/usage，否则 usage_preset 用 null。
@@ -332,6 +333,21 @@ export const RELAY_PRESETS: RelayPreset[] = [
         description: 'Fireworks AI 海外高速推理（按量 / Fire Pass 国际订阅）；OpenAI Chat 兼容',
         mark: 'FW', color: '#7C3AED', group: '三方模型', auth_prefix: 'fw-',
         category: 'third_party',
+    },
+    {
+        id: 'stepfun_plan',
+        name: '阶跃星辰 Step Plan',
+        base_url: 'https://api.stepfun.com/step_plan/v1',
+        homepage: 'https://platform.stepfun.com/plan-subscribe',
+        // Step Plan 的模型请求使用 API Key；额度查询需要平台控制台的 Oasis-Token。
+        usage_preset: 'stepfun_plan',
+        relay_protocol: 'chat_completions',
+        // Step Plan 直接从 /models 返回当前账号可用的 step-* 模型，不做 GPT 别名映射。
+        model_fallback: null,
+        model_map: null,
+        description: 'Step Plan 订阅；模型直接读取 /models，额度可用控制台 Oasis-Token 查询',
+        mark: 'St', color: '#0F766E', group: 'CODING PLAN', auth_prefix: 'sk-',
+        category: 'coding_plan',
     },
     {
         id: 'stepfun_step',
