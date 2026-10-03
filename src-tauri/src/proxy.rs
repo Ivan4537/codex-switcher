@@ -2723,6 +2723,8 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
 /// 随版本变），拿它们做判据等于把路由押在一个没人维护的字符串上。
 /// 本地专用，`handle_chat_inbound` 自己从零构造出站 header，绝不外泄到 chatgpt.com。
 const WORKER_FOLLOW_CURRENT_HEADER: &str = "x-pod-worker-follow-current";
+const WORKER_ROUTE_HEADER: &str = "x-pod-worker-route";
+const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 
 /// `chat/completions` 入站选中的账号来源。决定 401 时怎么处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2746,6 +2748,59 @@ fn wants_worker_current(headers: &hyper::HeaderMap) -> bool {
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim() == "1")
         .unwrap_or(false)
+}
+
+/// Select the stable key used only for local worker turn-state replay.
+/// Ordinary Codex traffic never enters this path, even when it carries the
+/// same session headers.
+fn worker_turn_state_cache_key(headers: &hyper::HeaderMap) -> Option<String> {
+    let route_marker = headers
+        .get(WORKER_ROUTE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if route_marker.is_none() && !wants_worker_current(headers) {
+        return None;
+    }
+
+    for name in ["session-id", "thread-id", WORKER_ROUTE_HEADER] {
+        if let Some(value) = headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn replayable_worker_turn_state_key(headers: &hyper::HeaderMap) -> Option<String> {
+    if headers.contains_key(TURN_STATE_HEADER) {
+        return None;
+    }
+    worker_turn_state_cache_key(headers)
+}
+
+fn inject_cached_turn_state(
+    headers: &mut reqwest::header::HeaderMap,
+    monitor: &TurnStateMonitor,
+    cache_key: Option<&str>,
+    account_id: &str,
+) {
+    if headers.contains_key(TURN_STATE_HEADER) {
+        return;
+    }
+    let Some(value) = cache_key.and_then(|key| monitor.lookup(key, account_id)) else {
+        return;
+    };
+    if let Ok(value) = reqwest::header::HeaderValue::from_str(&value) {
+        headers.insert(
+            reqwest::header::HeaderName::from_static(TURN_STATE_HEADER),
+            value,
+        );
+    }
 }
 
 /// `chat/completions` 入站选号的纯决策。
@@ -3421,12 +3476,18 @@ async fn handle_request(
         }),
         _ => None,
     };
+    let turn_state_cache_key = if is_chatgpt {
+        replayable_worker_turn_state_key(&req_headers)
+    } else {
+        None
+    };
     let turn_state_ctx = if is_chatgpt {
         used_account_id.clone().map(|account_id| TurnStateCtx {
             monitor: state.stats.turn_state.clone(),
             account_id,
             model: request_model(&body_bytes).unwrap_or_default(),
             session_key: session_key.clone(),
+            cache_key: turn_state_cache_key.clone(),
             source: "http_response_header".to_string(),
         })
     } else {
@@ -3456,7 +3517,15 @@ async fn handle_request(
             println!("[Proxy DEBUG]   {}: {}", name, v);
         }
     }
-    let base_headers = build_upstream_headers(&req_headers, &upstream_host);
+    let mut base_headers = build_upstream_headers(&req_headers, &upstream_host);
+    if let Some(account_id) = used_account_id.as_deref() {
+        inject_cached_turn_state(
+            &mut base_headers,
+            &state.stats.turn_state,
+            turn_state_cache_key.as_deref(),
+            account_id,
+        );
+    }
 
     // 5. 首次转发
     let upstream_resp = match forward_with_token(
@@ -4699,6 +4768,7 @@ fn build_upstream_headers(
         // 从不是官方客户端会发的字段，只对本地/日志有意义，不该离开这台机器。
         // `x-pod-worker-route`：本地硬路由专用 key（见 resolve_hard_route），
         // 同理只对本地有意义。
+        // `x-pi-agent-sdk`：只用于入站 body 兼容归一化，不能成为上游身份指纹。
         // `x-pod-worker-follow-current`：chat 入站的本地选号标记（见
         // WORKER_FOLLOW_CURRENT_HEADER）。chat 入站自己从零构造出站 header，本来
         // 就漏不出去；在这里一并剥掉是为了让"不外泄"成为被强制的性质而不是巧合。
@@ -4706,8 +4776,9 @@ fn build_upstream_headers(
         if lower == "session_id"
             || lower == "x-worker-id"
             || lower == "x-task-id"
-            || lower == "x-pod-worker-route"
+            || lower == WORKER_ROUTE_HEADER
             || lower == WORKER_FOLLOW_CURRENT_HEADER
+            || lower == "x-pi-agent-sdk"
         {
             continue;
         }
@@ -5532,14 +5603,15 @@ struct AffinityCtx {
     account_id: String,
 }
 
-/// Metadata carried to the response boundary for passive turn-state
-/// observation. The raw response header never leaves this boundary.
+/// Metadata carried to the response boundary for turn-state observation and
+/// optional local-worker replay caching.
 #[derive(Clone)]
 struct TurnStateCtx {
     monitor: Arc<TurnStateMonitor>,
     account_id: String,
     model: String,
     session_key: Option<String>,
+    cache_key: Option<String>,
     source: String,
 }
 
@@ -5599,6 +5671,7 @@ fn make_turn_state_ctx(
         account_id,
         model: request_model(body).unwrap_or_default(),
         session_key: session_key.map(ToOwned::to_owned),
+        cache_key: None,
         source: "http_response_header".to_string(),
     })
 }
@@ -6209,6 +6282,9 @@ fn build_stream_response_from_parts(
                 &ctx.source,
                 status.as_u16(),
             );
+            if let Some(cache_key) = ctx.cache_key.as_deref() {
+                ctx.monitor.remember(cache_key, &ctx.account_id, value);
+            }
         }
     }
     if !prefix.is_empty() {
@@ -9329,6 +9405,141 @@ mod tests {
         );
         let outbound = build_upstream_headers(&inbound, "chatgpt.com");
         assert!(outbound.get(WORKER_FOLLOW_CURRENT_HEADER).is_none());
+    }
+
+    fn worker_turn_headers(session_id: &str) -> hyper::HeaderMap {
+        let mut headers = worker_headers();
+        headers.insert(
+            HeaderName::from_static("session-id"),
+            HeaderValue::from_str(session_id).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn worker_turn_state_is_stored_then_injected_for_the_same_key() {
+        let monitor = TurnStateMonitor::new();
+        let inbound = worker_turn_headers("worker-a");
+        let cache_key = replayable_worker_turn_state_key(&inbound);
+        assert_eq!(cache_key.as_deref(), Some("worker-a"));
+
+        let mut first = build_upstream_headers(&inbound, "chatgpt.com");
+        inject_cached_turn_state(&mut first, &monitor, cache_key.as_deref(), "account-a");
+        assert!(first.get(TURN_STATE_HEADER).is_none());
+
+        monitor.remember("worker-a", "account-a", "state-a");
+        let mut continuation = build_upstream_headers(&inbound, "chatgpt.com");
+        inject_cached_turn_state(
+            &mut continuation,
+            &monitor,
+            cache_key.as_deref(),
+            "account-a",
+        );
+        assert_eq!(
+            continuation
+                .get(TURN_STATE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("state-a")
+        );
+    }
+
+    #[test]
+    fn downstream_turn_state_is_never_overwritten_or_retained() {
+        let monitor = TurnStateMonitor::new();
+        monitor.remember("worker-a", "account-a", "cached-state");
+        let mut inbound = worker_turn_headers("worker-a");
+        inbound.insert(
+            HeaderName::from_static(TURN_STATE_HEADER),
+            HeaderValue::from_static("downstream-state"),
+        );
+        assert_eq!(replayable_worker_turn_state_key(&inbound), None);
+
+        let mut outbound = build_upstream_headers(&inbound, "chatgpt.com");
+        inject_cached_turn_state(&mut outbound, &monitor, None, "account-a");
+        assert_eq!(
+            outbound
+                .get(TURN_STATE_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("downstream-state")
+        );
+        assert_eq!(
+            monitor.lookup("worker-a", "account-a").as_deref(),
+            Some("cached-state")
+        );
+    }
+
+    #[test]
+    fn worker_turn_state_does_not_cross_keys_or_plain_codex_traffic() {
+        let monitor = TurnStateMonitor::new();
+        monitor.remember("worker-a", "account-a", "state-a");
+
+        let new_worker = worker_turn_headers("worker-b");
+        let mut new_worker_outbound = build_upstream_headers(&new_worker, "chatgpt.com");
+        let new_key = replayable_worker_turn_state_key(&new_worker);
+        inject_cached_turn_state(
+            &mut new_worker_outbound,
+            &monitor,
+            new_key.as_deref(),
+            "account-a",
+        );
+        assert!(new_worker_outbound.get(TURN_STATE_HEADER).is_none());
+
+        let mut plain = hyper::HeaderMap::new();
+        plain.insert(
+            HeaderName::from_static("session-id"),
+            HeaderValue::from_static("worker-a"),
+        );
+        assert_eq!(replayable_worker_turn_state_key(&plain), None);
+    }
+
+    #[test]
+    fn worker_turn_state_key_prefers_session_then_thread_then_route() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(WORKER_ROUTE_HEADER),
+            HeaderValue::from_static("route-a"),
+        );
+        assert_eq!(worker_turn_state_cache_key(&headers).as_deref(), Some("route-a"));
+
+        headers.insert(
+            HeaderName::from_static("thread-id"),
+            HeaderValue::from_static("thread-a"),
+        );
+        assert_eq!(
+            worker_turn_state_cache_key(&headers).as_deref(),
+            Some("thread-a")
+        );
+
+        headers.insert(
+            HeaderName::from_static("session-id"),
+            HeaderValue::from_static("session-a"),
+        );
+        assert_eq!(
+            worker_turn_state_cache_key(&headers).as_deref(),
+            Some("session-a")
+        );
+    }
+
+    #[test]
+    fn account_switch_still_strips_turn_state() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static(TURN_STATE_HEADER),
+            reqwest::header::HeaderValue::from_static("state-a"),
+        );
+        let switched = headers_without_turn_state(&headers);
+        assert!(switched.get(TURN_STATE_HEADER).is_none());
+    }
+
+    #[test]
+    fn pi_sdk_marker_is_consumed_locally() {
+        let mut inbound = hyper::HeaderMap::new();
+        inbound.insert(
+            HeaderName::from_static("x-pi-agent-sdk"),
+            HeaderValue::from_static("1"),
+        );
+        let outbound = build_upstream_headers(&inbound, "chatgpt.com");
+        assert!(outbound.get("x-pi-agent-sdk").is_none());
     }
 
     #[test]

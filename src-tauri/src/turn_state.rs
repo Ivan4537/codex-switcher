@@ -1,19 +1,21 @@
-//! Read-only observations of the upstream `X-Codex-Turn-State` response header.
+//! Observations and bounded worker-session replay for `X-Codex-Turn-State`.
 //!
-//! This module deliberately does not retain or expose the header value.  The
-//! envelope shape and the 292/312/332 length buckets are empirical heuristics,
-//! not proof of account health or model quality.  The first implementation is
-//! passive-only: it never probes, injects, retries, or changes routing.
+//! Raw values are retained only in a private, account-bound TTL cache so local
+//! worker requests can continue a turn when their downstream client omits the
+//! header. Status output exposes only hashes and envelope heuristics.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Mutex;
+use std::time::{Duration as StdDuration, Instant};
 
 const HEADER: &str = "X-Codex-Turn-State";
 const MAX_RECENT: usize = 100;
+const MAX_CACHED_TURNS: usize = 1024;
+const CACHED_TURN_TTL: StdDuration = StdDuration::from_secs(3600);
 const HEURISTIC_TTL_SECONDS: i64 = 3600;
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,6 +51,13 @@ struct Inner {
     by_classification: BTreeMap<String, u64>,
     last: Option<TurnStateObservation>,
     recent: VecDeque<TurnStateObservation>,
+    cached_by_key: HashMap<String, CachedTurnState>,
+}
+
+struct CachedTurnState {
+    value: String,
+    account_id: String,
+    updated_at: Instant,
 }
 
 pub struct TurnStateMonitor {
@@ -69,8 +78,59 @@ impl TurnStateMonitor {
                 by_classification: BTreeMap::new(),
                 last: None,
                 recent: VecDeque::with_capacity(MAX_RECENT),
+                cached_by_key: HashMap::new(),
             }),
         }
+    }
+
+    /// Retain a response value for one local worker key and one upstream auth
+    /// identity. The value remains private to the proxy transport path.
+    pub(crate) fn remember(&self, key: &str, account_id: &str, value: &str) {
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() || account_id.is_empty() || value.is_empty() {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let now = Instant::now();
+        inner
+            .cached_by_key
+            .retain(|_, entry| now.duration_since(entry.updated_at) <= CACHED_TURN_TTL);
+        if !inner.cached_by_key.contains_key(key)
+            && inner.cached_by_key.len() >= MAX_CACHED_TURNS
+        {
+            if let Some(oldest) = inner
+                .cached_by_key
+                .iter()
+                .min_by_key(|(_, entry)| entry.updated_at)
+                .map(|(key, _)| key.clone())
+            {
+                inner.cached_by_key.remove(&oldest);
+            }
+        }
+        inner.cached_by_key.insert(
+            key.to_string(),
+            CachedTurnState {
+                value: value.to_string(),
+                account_id: account_id.to_string(),
+                updated_at: now,
+            },
+        );
+    }
+
+    /// Return the current value only when the worker key is still bound to the
+    /// same account. An auth change deletes the stale entry instead of allowing
+    /// it to become valid again after a later account switch.
+    pub(crate) fn lookup(&self, key: &str, account_id: &str) -> Option<String> {
+        let mut inner = self.inner.lock().ok()?;
+        let entry = inner.cached_by_key.get(key)?;
+        if entry.updated_at.elapsed() > CACHED_TURN_TTL || entry.account_id != account_id {
+            inner.cached_by_key.remove(key);
+            return None;
+        }
+        Some(entry.value.clone())
     }
 
     pub fn observe(
@@ -239,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_known_envelopes_without_retaining_value() {
+    fn classifies_known_envelopes_without_exposing_value() {
         let value = sample(10, Utc::now().timestamp() as u64);
         let observation = inspect(&value, Some("account"), Some("model"), None, "http", 200);
         assert_eq!(observation.classification, "personal_normal");
@@ -269,5 +329,48 @@ mod tests {
             status.by_classification.get("malformed"),
             Some(&((MAX_RECENT + 5) as u64))
         );
+    }
+
+    #[test]
+    fn worker_value_is_account_bound_and_expires_on_auth_change() {
+        let monitor = TurnStateMonitor::new();
+        monitor.remember("worker-session", "account-a", "state-a");
+        assert_eq!(
+            monitor.lookup("worker-session", "account-a").as_deref(),
+            Some("state-a")
+        );
+        assert_eq!(monitor.lookup("worker-session", "account-b"), None);
+        assert_eq!(monitor.lookup("worker-session", "account-a"), None);
+    }
+
+    #[test]
+    fn worker_cache_is_bounded() {
+        let monitor = TurnStateMonitor::new();
+        for index in 0..=MAX_CACHED_TURNS {
+            monitor.remember(&format!("key-{index}"), "account", "state");
+        }
+        let inner = monitor.inner.lock().unwrap();
+        assert_eq!(inner.cached_by_key.len(), MAX_CACHED_TURNS);
+    }
+
+    #[test]
+    fn expired_worker_value_is_removed() {
+        let monitor = TurnStateMonitor::new();
+        monitor.remember("worker-session", "account", "state");
+        monitor
+            .inner
+            .lock()
+            .unwrap()
+            .cached_by_key
+            .get_mut("worker-session")
+            .unwrap()
+            .updated_at = Instant::now() - CACHED_TURN_TTL - StdDuration::from_secs(1);
+        assert_eq!(monitor.lookup("worker-session", "account"), None);
+        assert!(monitor
+            .inner
+            .lock()
+            .unwrap()
+            .cached_by_key
+            .is_empty());
     }
 }
