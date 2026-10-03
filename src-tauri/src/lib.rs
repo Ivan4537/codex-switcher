@@ -35,6 +35,7 @@ mod switch_log;
 mod token_tracker;
 mod tray;
 mod tray_position;
+mod turn_state;
 mod usage;
 #[cfg(windows)]
 mod windows_clipboard;
@@ -289,6 +290,12 @@ fn get_proxy_status(state: State<AppState>) -> Result<ProxyStatus, String> {
             .auto_switches
             .load(std::sync::atomic::Ordering::Relaxed),
     })
+}
+
+/// Read-only observations of upstream Codex turn-state response headers.
+#[tauri::command]
+fn get_turn_state_status(state: State<AppState>) -> Result<proxy::TurnStateStatus, String> {
+    Ok(state.proxy_stats.turn_state.status())
 }
 
 /// 更新全局设置
@@ -3207,7 +3214,7 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
                 // Plus 的 5h 窗口一旦回满，优先把它用起来，避免在其它订阅号上
                 // 白白消耗额度。这个是硬优先级，不再让 Pro 的 plan_bonus 压过满额 Plus。
                 // 仍保留 weekly > 0 的前置过滤：周限额已耗尽的 Plus 不是可用候选。
-                let full_plus_bonus = if plan == "plus" && q.five_hour_left >= 100.0 {
+                let full_plus_bonus = if effective > 0.0 && plan == "plus" && q.five_hour_left >= 100.0 {
                     1_000_000.0
                 } else {
                     0.0
@@ -3215,7 +3222,7 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
 
                 // 余额只作为套餐窗口耗尽后的兜底，不抢占仍有窗口额度的账号。
                 let credits_fallback_bonus = if effective <= 0.0 && has_spendable_credits {
-                    0.5
+                    -1_000.0
                 } else {
                     0.0
                 };
@@ -3231,6 +3238,43 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
     // 按得分从高到低排序
     scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     scored
+}
+
+/// 积分仅兜底：当前账号只剩积分时，优先选择已确认仍有套餐额度的健康账号。
+/// 未知缓存不作为主动切走依据；free/Relay 仍遵守原有自动切入策略。
+pub(crate) fn subscription_candidate_before_credits(
+    store: &AccountStore,
+    account_id: &str,
+) -> Option<String> {
+    let account = store.accounts.get(account_id)?;
+    if !account.is_openai_account() {
+        return None;
+    }
+    let quota = account.cached_quota.as_ref()?;
+    if quota.has_rate_limit_quota() || !quota.has_spendable_credits() {
+        return None;
+    }
+    let eligible = |id: &str| {
+        store.accounts.get(id).is_some_and(|a| {
+            id != account_id
+                && a.is_openai_account()
+                && !a.is_banned && !a.is_token_invalid && !a.is_logged_out
+                && AccountStore::extract_access_token(&a.auth_json).is_some()
+                && a.cached_quota.as_ref().is_some_and(|q| {
+                    q.has_rate_limit_quota()
+                        && (store.settings.allow_auto_switch_to_free
+                            || !matches!(q.plan_type.to_lowercase().as_str(), "free" | "unknown"))
+                })
+        })
+    };
+    // affinity 可能指向旧积分号，此时可以直接回到有套餐额度的 current。
+    if let Some(id) = store.current.as_deref().filter(|id| eligible(id)) {
+        return Some(id.to_string());
+    }
+    score_candidate_accounts(store)
+        .into_iter()
+        .find(|(id, _, _)| eligible(id))
+        .map(|(id, _, _)| id)
 }
 
 /// 预测下一个最优账号（tray 菜单预览）
@@ -6401,6 +6445,7 @@ pub fn run() {
             get_settings,
             update_settings,
             get_proxy_status,
+            get_turn_state_status,
             kill_codex_processes,
             set_proxy_env,
             get_token_stats,
@@ -6957,12 +7002,47 @@ mod tests {
             luna_reserve: None,
             updated_at: now,
         });
-        store.accounts.insert(credit_only.id.clone(), credit_only);
+        store.accounts.insert(credit_only.id.clone(), credit_only.clone());
 
         let candidates = score_candidate_accounts(&store);
         assert_eq!(
             candidates.first().map(|candidate| candidate.0.as_str()),
             Some("credits")
         );
+
+        // 即使 TEAM 只剩少量套餐额度，也必须排在 PRO 的积分前面。
+        store.accounts.get_mut("credits").unwrap().cached_quota.as_mut().unwrap().plan_type = "pro".into();
+        let mut team = credit_only.clone();
+        team.id = "team".into();
+        team.auth_json["tokens"]["access_token"] = serde_json::json!("test-team-access-token");
+        let q = team.cached_quota.as_mut().unwrap();
+        q.plan_type = "team".into();
+        q.five_hour_left = 0.1;
+        q.weekly_left = 100.0;
+        q.credits_balance = None;
+        store.accounts.insert(team.id.clone(), team);
+        assert_eq!(score_candidate_accounts(&store)[0].0, "team");
+
+        store.current = Some("credits".into());
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), Some("team".into()));
+        store.accounts.get_mut("team").unwrap().is_banned = true;
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), None);
+        store.accounts.get_mut("team").unwrap().is_banned = false;
+        store.accounts.get_mut("team").unwrap().cached_quota.as_mut().unwrap().weekly_left = 0.0;
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), None);
+
+        // 周限额已耗尽的满 5h Plus 也不能凭满额加分抢占套餐候选。
+        let mut plus = credit_only;
+        plus.id = "plus".into();
+        plus.cached_quota.as_mut().unwrap().five_hour_left = 100.0;
+        store.accounts.insert(plus.id.clone(), plus);
+        store.accounts.get_mut("team").unwrap().cached_quota.as_mut().unwrap().weekly_left = 100.0;
+        assert_eq!(score_candidate_accounts(&store)[0].0, "team");
+        store.current = Some("team".into());
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), Some("team".into()));
+        store.accounts.get_mut("team").unwrap().cached_quota.as_mut().unwrap().plan_type = "free".into();
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), None);
+        store.settings.allow_auto_switch_to_free = true;
+        assert_eq!(subscription_candidate_before_credits(&store, "credits"), Some("team".into()));
     }
 }

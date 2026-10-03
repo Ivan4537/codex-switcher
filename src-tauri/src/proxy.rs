@@ -34,6 +34,8 @@ use crate::session_routes::SessionRoutesStore;
 use crate::sse_watchdog::{wrap_with_sse_watchdog, SseStreamDiagnostic};
 use crate::switch_log::{SwitchLogger, SwitchReason};
 use crate::token_tracker::TokenTracker;
+use crate::turn_state::TurnStateMonitor;
+pub use crate::turn_state::TurnStateStatus;
 
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
@@ -267,6 +269,7 @@ type ProxyBody = UnsyncBoxBody<Bytes, String>;
 pub struct ProxyStats {
     pub total_requests: AtomicU64,
     pub auto_switches: AtomicU64,
+    pub turn_state: Arc<TurnStateMonitor>,
 }
 
 impl Default for ProxyStats {
@@ -274,6 +277,7 @@ impl Default for ProxyStats {
         Self {
             total_requests: AtomicU64::new(0),
             auto_switches: AtomicU64::new(0),
+            turn_state: Arc::new(TurnStateMonitor::new()),
         }
     }
 }
@@ -603,8 +607,10 @@ async fn get_current_token(state: &ProxyState) -> Result<(String, bool), String>
 async fn resolve_token_with_affinity(
     state: &ProxyState,
     session_key: Option<&str>,
+    prefer_subscription: bool,
 ) -> Result<(String, bool, Option<String>, bool), String> {
     let Some(sk) = session_key else {
+        if prefer_subscription { switch_credits_to_subscription(state); }
         let (tok, is_cgpt) = get_current_token(state).await?;
         let cur = state.store.lock().ok().and_then(|s| {
             s.current
@@ -667,6 +673,8 @@ async fn resolve_token_with_affinity(
         return Ok((token, is_chatgpt, Some(account_id), true));
     }
 
+    if prefer_subscription { switch_credits_to_subscription(state); }
+
     // 1) 先看绑定的号是否健康（不依赖 quota，因为 cached_quota 可能滞后；只看 banned/logged_out/token_invalid）
     // 此外：当 current 不是 Relay 但 binding 指向 Relay 时，按 relay_auto_switch_in 决定是否
     // 用这条 binding——默认 false 即"不切到 Relay"，避免 affinity 把订阅号会话偷偷拉回 Relay 扣余额。
@@ -697,7 +705,8 @@ async fn resolve_token_with_affinity(
                     // 静默 mid-stream RST（不是干净 429），codex 看到 transport error
                     // 反复重连 5/5 仍失败。把这种"软失效"也从 affinity 候选剔除。
                     match a.cached_quota.as_ref() {
-                        Some(q) => q.has_usable_quota(),
+                        Some(q) => q.has_usable_quota()
+                            && (!prefer_subscription || crate::subscription_candidate_before_credits(&store, id).is_none()),
                         None => true, // 没缓存就给个 benefit of doubt
                     }
                 })
@@ -1310,6 +1319,7 @@ async fn handle_antigravity_response(
                 Bytes::new(),
                 translated_stream,
                 Some(state.tracker.clone()),
+                None,
                 None,
             );
         }
@@ -1962,7 +1972,7 @@ async fn handle_named_relay_response(
             let _ = store.save();
         }
     }
-    build_stream_response(response, None, None)
+    build_stream_response(response, None, None, None)
 }
 
 fn is_responses_compact_path(path: &str) -> bool {
@@ -2190,6 +2200,23 @@ fn normalize_chatgpt_responses_body(
 enum PickResult {
     Found { id: String, token: String },
     Exhausted { earliest_reset: Option<i64> },
+}
+
+fn switch_credits_to_subscription(state: &ProxyState) -> bool {
+    let target = state.store.lock().ok().and_then(|store| {
+        let id = store.current.as_deref()?;
+        crate::subscription_candidate_before_credits(&store, id)
+    });
+    let Some(target) = target else { return false; };
+    if state.switching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return false;
+    }
+    let switched = do_switch(state, &target, SwitchReason::QuotaThreshold).is_ok();
+    state.switching.store(false, Ordering::SeqCst);
+    if switched {
+        println!("[Proxy] 套餐额度优先：切离仅剩积分的账号");
+    }
+    switched
 }
 
 fn pick_next_account(state: &ProxyState) -> PickResult {
@@ -3375,7 +3402,8 @@ async fn handle_request(
                 Err(error) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &error)),
             }
         } else {
-            match resolve_token_with_affinity(&state, session_key.as_deref()).await {
+            match resolve_token_with_affinity(&state, session_key.as_deref(),
+                !request_is_spark_model(&body_bytes) && !current_has_luna_reserve_for_request(&state, &body_bytes)).await {
                 Ok(t) => t,
                 Err(e) => return Ok(error_response(StatusCode::SERVICE_UNAVAILABLE, &e)),
             }
@@ -3392,6 +3420,17 @@ async fn handle_request(
             account_id: aid,
         }),
         _ => None,
+    };
+    let turn_state_ctx = if is_chatgpt {
+        used_account_id.clone().map(|account_id| TurnStateCtx {
+            monitor: state.stats.turn_state.clone(),
+            account_id,
+            model: request_model(&body_bytes).unwrap_or_default(),
+            session_key: session_key.clone(),
+            source: "http_response_header".to_string(),
+        })
+    } else {
+        None
     };
 
     // 2. 根据认证模式路由上游（Relay 类型从 used_account_id 查 base_url）
@@ -3562,6 +3601,7 @@ async fn handle_request(
                             retry_resp,
                             Some(state.tracker.clone()),
                             session_affinity_ctx.clone(),
+                            turn_state_ctx.clone(),
                         ));
                     }
                 }
@@ -3829,7 +3869,8 @@ async fn handle_request(
                 let backoff = std::time::Duration::from_secs(2 * attempt);
                 tokio::time::sleep(backoff).await;
                 let (retry_token, _) =
-                    match resolve_token_with_affinity(&state, session_key.as_deref()).await {
+                    match resolve_token_with_affinity(&state, session_key.as_deref(),
+                !request_is_spark_model(&body_bytes) && !current_has_luna_reserve_for_request(&state, &body_bytes)).await {
                         Ok((t, c, _, _)) => (t, c),
                         Err(_) => continue,
                     };
@@ -3859,6 +3900,7 @@ async fn handle_request(
                                 base_headers.clone(),
                                 body_bytes.clone(),
                                 session_affinity_ctx.clone(),
+                                turn_state_ctx.clone(),
                             );
                             return Ok(resp);
                         }
@@ -3866,6 +3908,7 @@ async fn handle_request(
                             retry_resp,
                             Some(state.tracker.clone()),
                             session_affinity_ctx.clone(),
+                            turn_state_ctx.clone(),
                         ));
                     }
                     if s == reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -3877,6 +3920,7 @@ async fn handle_request(
                         retry_resp,
                         Some(state.tracker.clone()),
                         session_affinity_ctx.clone(),
+                        turn_state_ctx.clone(),
                     ));
                 }
             }
@@ -3938,7 +3982,8 @@ async fn handle_request(
                 let backoff = std::time::Duration::from_secs(2 * attempt);
                 tokio::time::sleep(backoff).await;
                 let (retry_token, _) =
-                    match resolve_token_with_affinity(&state, session_key.as_deref()).await {
+                    match resolve_token_with_affinity(&state, session_key.as_deref(),
+                !request_is_spark_model(&body_bytes) && !current_has_luna_reserve_for_request(&state, &body_bytes)).await {
                         Ok((t, c, _, _)) => (t, c),
                         Err(_) => continue,
                     };
@@ -3969,6 +4014,7 @@ async fn handle_request(
                                 base_headers.clone(),
                                 body_bytes.clone(),
                                 session_affinity_ctx.clone(),
+                                turn_state_ctx.clone(),
                             );
                             return Ok(resp);
                         }
@@ -3976,6 +4022,7 @@ async fn handle_request(
                             retry_resp,
                             Some(state.tracker.clone()),
                             session_affinity_ctx.clone(),
+                            turn_state_ctx.clone(),
                         ));
                     }
                     if s.as_u16() >= 500 && s.as_u16() < 600 {
@@ -3987,6 +4034,7 @@ async fn handle_request(
                         retry_resp,
                         Some(state.tracker.clone()),
                         session_affinity_ctx.clone(),
+                        turn_state_ctx.clone(),
                     ));
                 }
             }
@@ -4060,6 +4108,7 @@ async fn handle_request(
             base_headers.clone(),
             body_bytes.clone(),
             session_affinity_ctx.clone(),
+            turn_state_ctx.clone(),
         );
         // 后台检查预防性切号（保持原行为）
         let state_clone = state.clone();
@@ -4087,6 +4136,7 @@ async fn handle_request(
         upstream_resp,
         Some(state.tracker.clone()),
         session_affinity_ctx,
+        turn_state_ctx,
     );
 
     // 后台检查预防性切号
@@ -4874,7 +4924,18 @@ async fn forward_to_server_with_silent_retry(
 
         // 不限额，或最后一次尝试 —— 把 first_chunk 当 prefix，剩余 stream 续上
         let rest = stream.boxed();
-        let resp = build_stream_response_from_parts(status, headers, first_chunk, rest, None, None);
+        let resp = build_stream_response_from_parts(
+            status,
+            headers,
+            first_chunk,
+            rest,
+            None,
+            None,
+            // In client mode the remote Server owns account selection; the
+            // local client must not guess an account for this response. The
+            // Server-side proxy observes the upstream response instead.
+            None,
+        );
         if is_rate_limit {
             println!(
                 "[Proxy] silent_retry: max_retries={} 用完仍限额，把最后一次响应透回 codex",
@@ -5311,12 +5372,14 @@ async fn forward_and_bootstrap(
         return BootstrappedForward::Unauthorized;
     }
     let aff = make_affinity_ctx(state, session_key);
+    let turn_state_ctx = make_turn_state_ctx(state, session_key, body);
     // 非 200 或非 SSE：保留旧行为，直接透传给客户端
     if status != reqwest::StatusCode::OK || !is_sse_response(&resp) {
         return BootstrappedForward::Ok(build_stream_response(
             resp,
             Some(state.tracker.clone()),
             aff,
+            turn_state_ctx.clone(),
         ));
     }
     let headers = resp.headers().clone();
@@ -5331,6 +5394,7 @@ async fn forward_and_bootstrap(
                 rest,
                 Some(state.tracker.clone()),
                 aff,
+                turn_state_ctx,
             ))
         }
         SseBootstrap::RateLimitInStream => BootstrappedForward::RateLimit,
@@ -5468,6 +5532,17 @@ struct AffinityCtx {
     account_id: String,
 }
 
+/// Metadata carried to the response boundary for passive turn-state
+/// observation. The raw response header never leaves this boundary.
+#[derive(Clone)]
+struct TurnStateCtx {
+    monitor: Arc<TurnStateMonitor>,
+    account_id: String,
+    model: String,
+    session_key: Option<String>,
+    source: String,
+}
+
 /// 切号到新账号时调用：把 body 里的 `prompt_cache_key` 后缀拼上当前 account_id。
 /// codex CLI/App 默认用 `conversation_id` 当 prompt_cache_key（codex-rs/core/src/client.rs:699）
 /// —— 不区分账号。账号 A 写过 cache 后，切到 B 拿同样 key 命中的 cache 在 OpenAI
@@ -5510,6 +5585,21 @@ fn make_affinity_ctx(state: &ProxyState, session_key: Option<&str>) -> Option<Af
         affinity: state.session_affinity.clone(),
         session_key: sk.to_string(),
         account_id: aid,
+    })
+}
+
+fn make_turn_state_ctx(
+    state: &ProxyState,
+    session_key: Option<&str>,
+    body: &Bytes,
+) -> Option<TurnStateCtx> {
+    let account_id = state.store.lock().ok()?.current.clone()?;
+    Some(TurnStateCtx {
+        monitor: state.stats.turn_state.clone(),
+        account_id,
+        model: request_model(body).unwrap_or_default(),
+        session_key: session_key.map(ToOwned::to_owned),
+        source: "http_response_header".to_string(),
     })
 }
 
@@ -5963,6 +6053,7 @@ fn build_streaming_response_with_bootstrap(
     base_headers: reqwest::header::HeaderMap,
     body_bytes: Bytes,
     affinity_ctx: Option<AffinityCtx>,
+    turn_state_ctx: Option<TurnStateCtx>,
 ) -> Response<ProxyBody> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(8);
 
@@ -5991,6 +6082,7 @@ fn build_streaming_response_with_bootstrap(
         body_stream,
         Some(state.tracker.clone()),
         affinity_ctx,
+        turn_state_ctx,
     )
 }
 
@@ -5999,11 +6091,20 @@ fn build_stream_response(
     upstream_resp: reqwest::Response,
     tracker: Option<Arc<TokenTracker>>,
     affinity_ctx: Option<AffinityCtx>,
+    turn_state_ctx: Option<TurnStateCtx>,
 ) -> Response<ProxyBody> {
     let status = upstream_resp.status();
     let headers = upstream_resp.headers().clone();
     let stream = upstream_resp.bytes_stream().boxed();
-    build_stream_response_from_parts(status, headers, Bytes::new(), stream, tracker, affinity_ctx)
+    build_stream_response_from_parts(
+        status,
+        headers,
+        Bytes::new(),
+        stream,
+        tracker,
+        affinity_ctx,
+        turn_state_ctx,
+    )
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -6075,6 +6176,7 @@ fn build_stream_response_from_parts(
     rest: ByteStream,
     tracker: Option<Arc<TokenTracker>>,
     affinity_ctx: Option<AffinityCtx>,
+    turn_state_ctx: Option<TurnStateCtx>,
 ) -> Response<ProxyBody> {
     let mut builder = Response::builder().status(status.as_u16());
 
@@ -6093,6 +6195,22 @@ fn build_stream_response_from_parts(
     }
 
     let usage_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    if let Some(ctx) = &turn_state_ctx {
+        if let Some(value) = headers
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok())
+        {
+            ctx.monitor.observe(
+                value,
+                Some(&ctx.account_id),
+                Some(&ctx.model),
+                ctx.session_key.as_deref(),
+                &ctx.source,
+                status.as_u16(),
+            );
+        }
+    }
     if !prefix.is_empty() {
         if let Ok(mut b) = usage_buf.lock() {
             b.extend_from_slice(&prefix);
@@ -6254,6 +6372,12 @@ async fn handle_websocket(
     state: Arc<ProxyState>,
     mut req: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
+    let reserve_requested = routing_hint_model(req.headers()).as_deref().is_some_and(|model| {
+        model.eq_ignore_ascii_case("gpt-reserve") || model.eq_ignore_ascii_case("gpt-5.6-luna")
+    });
+    if !(reserve_requested && current_has_luna_reserve(&state)) {
+        switch_credits_to_subscription(&state);
+    }
     // 1. 获取 token 和上游地址
     let (mut token, mut is_chatgpt) = match get_current_token(&state).await {
         Ok(t) => t,
@@ -6709,6 +6833,31 @@ async fn handle_websocket(
 
     println!("[Proxy] WebSocket 上游已连接");
 
+    // WebSocket messages do not carry HTTP response headers, but the upstream
+    // handshake can. Observe that header if present; do not inspect or mutate
+    // any WebSocket payload for turn-state.
+    if let Some(value) = upstream_handshake_resp
+        .headers()
+        .get("x-codex-turn-state")
+        .and_then(|value| value.to_str().ok())
+    {
+        let ws_account_id = state
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.current.clone());
+        let ws_model = routing_hint_model(req.headers());
+        let ws_session = crate::session_affinity::extract_session_key(&[], req.headers());
+        state.stats.turn_state.observe(
+            value,
+            ws_account_id.as_deref(),
+            ws_model.as_deref(),
+            ws_session.as_deref(),
+            "websocket_handshake",
+            101,
+        );
+    }
+
     // 4. 计算 Sec-WebSocket-Accept 回复客户端
     let ws_key = req
         .headers()
@@ -7159,6 +7308,7 @@ async fn bridge_websockets<S1, S2>(
         return;
     }
 
+    let socket_account_id = state.store.lock().ok().and_then(|s| s.current.clone());
     let (mut client_write, mut client_read) = client.split();
     let (mut upstream_write, mut upstream_read) = upstream.split();
 
@@ -7454,8 +7604,29 @@ async fn bridge_websockets<S1, S2>(
                         break;
                     }
 
+                    // 完整透传本轮终止帧后再切号，避免中断进行中的输出。
+                    let completed = matches!(&msg, tungstenite::Message::Text(t) if
+                        serde_json::from_str::<serde_json::Value>(t).ok()
+                            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                            .as_deref() == Some("response.completed"));
                     if let Err(e) = client_write.send(msg).await {
                         println!("[Proxy] WS bridge: client_write.send 失败: {}", e);
+                        break;
+                    }
+                    if completed
+                        && !ws_is_spark_r.load(Ordering::Relaxed)
+                        && !ws_is_luna_reserve_r.load(Ordering::Relaxed)
+                        && {
+                            switch_credits_to_subscription(&state_clone);
+                            state_clone.store.lock().ok().is_some_and(|store| {
+                                socket_account_id.as_deref().is_some_and(|id| {
+                                    store.current.as_deref() != Some(id)
+                                        && crate::subscription_candidate_before_credits(&store, id).is_some()
+                                })
+                            })
+                        }
+                    {
+                        let _ = client_write.send(tungstenite::Message::Close(None)).await;
                         break;
                     }
                 }
@@ -8305,7 +8476,7 @@ async fn handle_chat_completions_relay(
                 .send()
                 .await
             {
-                Ok(response) => return build_stream_response(response, None, None),
+                Ok(response) => return build_stream_response(response, None, None, None),
                 Err(error) => {
                     return error_response(
                         StatusCode::BAD_GATEWAY,
@@ -8358,7 +8529,9 @@ async fn handle_chat_completions_relay(
         )
         .await
         {
-            Ok(resp) => return build_stream_response(resp, Some(state.tracker.clone()), None),
+            Ok(resp) => {
+                return build_stream_response(resp, Some(state.tracker.clone()), None, None)
+            }
             Err(e) => {
                 return error_response(StatusCode::BAD_GATEWAY, &format!("上游连接失败: {}", e))
             }
@@ -8690,6 +8863,7 @@ async fn handle_chat_completions_relay(
         Bytes::new(),
         body_stream,
         Some(state.tracker.clone()),
+        None,
         None,
     )
 }
