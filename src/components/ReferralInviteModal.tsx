@@ -95,7 +95,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
             <div className="modal-body referral-modal-body">
                 <div className="referral-account-strip">
                     <span className="referral-account-label">发邀账号</span>
-                    <strong>{name}</strong>
+                    <strong translate="no">{name}</strong>
                     <span className="referral-account-tag">{referralProgramLabel(program)}</span>
                 </div>
 

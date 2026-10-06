@@ -85,6 +85,92 @@
 .stat-card.green .stat-card-value { color: #10b981; }
 .stat-card.blue .stat-card-value { color: #3b82f6; }
 
+/* Turn-State 被动观测 */
+.turn-state-summary {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.turn-state-summary > div {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 10px;
+    text-align: center;
+}
+
+.turn-state-value {
+    display: block;
+    color: var(--text-primary);
+    font-size: 1.25rem;
+    font-weight: 700;
+}
+
+.turn-state-value.good,
+.turn-state-good { color: #10b981; }
+.turn-state-value.warn,
+.turn-state-warn { color: #fbbf24; }
+.turn-state-value.muted { color: var(--text-muted); }
+
+.turn-state-label {
+    display: block;
+    color: var(--text-muted);
+    font-size: 11px;
+    margin-top: 3px;
+}
+
+.turn-state-note {
+    color: var(--text-muted);
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+.turn-state-table {
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.turn-state-row {
+    display: grid;
+    grid-template-columns: 140px minmax(160px, 1.4fr) 1fr 1fr 90px;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.turn-state-header {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    background: var(--card-bg);
+}
+
+@media (max-width: 900px) {
+    .turn-state-summary {
+        grid-template-columns: repeat(3, 1fr);
+    }
+
+    .turn-state-row {
+        grid-template-columns: 110px minmax(120px, 1.4fr) 1fr;
+    }
+
+    .turn-state-row > :nth-child(4),
+    .turn-state-row > :nth-child(5) {
+        display: none;
+    }
+}
+
+@media (max-width: 600px) {
+    .turn-state-summary {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
 /* 统计区块 */
 .stats-section {
     background: var(--card-bg);

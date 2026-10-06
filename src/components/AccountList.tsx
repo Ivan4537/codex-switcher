@@ -1029,6 +1029,7 @@ export function AccountList({
                                         };
                                         return (
                                             <span
+                                                translate="no"
                                                 className={isRelay ? 'email-text relay-name-link' : 'email-text'}
                                                 onClick={onNameClick}
                                                 title={isRelay && link ? `点击打开 ${link}` : undefined}
@@ -1226,7 +1227,7 @@ export function AccountList({
             <ConfirmModal
                 isOpen={!!accountToDelete}
                 title="确认删除账号"
-                message={<p>确定要永久删除账号 <strong>{accountToDelete?.name}</strong> 吗？<br /><br />此操作不可恢复，删除后有关该账号的本地授权信息将被清除。</p>}
+                message={<p>确定要永久删除账号 <strong translate="no">{accountToDelete?.name}</strong> 吗？<br /><br />此操作不可恢复，删除后有关该账号的本地授权信息将被清除。</p>}
                 confirmText="彻底删除"
                 onConfirm={() => {
                     if (accountToDelete) {
@@ -1243,7 +1244,7 @@ export function AccountList({
                         <div className="account-expiry-modal-header">
                             <div>
                                 <h2>账号到期日</h2>
-                                <p>{expiryEditor.name}</p>
+                                <p translate="no">{expiryEditor.name}</p>
                             </div>
                             <button className="close-btn" onClick={() => setExpiryEditor(null)} disabled={savingExpiry}>×</button>
                         </div>
@@ -1282,7 +1283,7 @@ export function AccountList({
                         <div className="account-expiry-modal-header">
                             <div>
                                 <h2>周期保鲜</h2>
-                                <p>{primeEditor.name}</p>
+                                <p translate="no">{primeEditor.name}</p>
                             </div>
                             <button className="close-btn" onClick={() => setPrimeEditor(null)} disabled={savingPrime}>×</button>
                         </div>
@@ -1336,7 +1337,7 @@ export function AccountList({
                     <div className="modal-content reset-credit-modal" onClick={e => e.stopPropagation()}>
                         <div className="modal-header">
                             <div className="header-top">
-                                <h2>主动重置 · {resetModal.name}</h2>
+                                <h2>主动重置 · <span translate="no">{resetModal.name}</span></h2>
                                 <button className="close-btn" onClick={closeResetModal} disabled={resetting}>×</button>
                             </div>
                         </div>
@@ -1409,8 +1410,8 @@ export function AccountList({
                         <div className="modal-body">
                             <p className="modal-tip" style={{ marginBottom: 12 }}>
                                 {isStepFun
-                                    ? <>账号：{cookieEditor.name}。登录 <code>platform.stepfun.com</code> 后复制 <code>Oasis-Token</code>，也可粘贴包含它的 Cookie header。</>
-                                    : <>账号：{cookieEditor.name}。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。</>}
+                                    ? <>账号：<span translate="no">{cookieEditor.name}</span>。登录 <code>platform.stepfun.com</code> 后复制 <code>Oasis-Token</code>，也可粘贴包含它的 Cookie header。</>
+                                    : <>账号：<span translate="no">{cookieEditor.name}</span>。登录 <code>platform.xiaomimimo.com</code> 后，从 Network 请求里复制 <code>Cookie:</code> header。</>}
                             </p>
                             <textarea
                                 value={cookieEditor.value}

@@ -1,4 +1,5 @@
 import { russianLocale } from './ru';
+import { englishLocale } from './en';
 import { installUiLocale, type UiLocale } from './runtime';
 
 export interface AppLocaleDefinition {
@@ -24,6 +25,14 @@ export const appLocales: readonly AppLocaleDefinition[] = [
     languagePrefixes: ['zh'],
     nativeName: '中文',
     flag: '🇨🇳',
+  },
+  {
+    code: 'en',
+    languagePrefixes: ['en'],
+    nativeName: 'English',
+    flag: '🇬🇧',
+    translation: englishLocale,
+    contributors: [{ name: 'InventiveSpark', url: 'https://github.com/InventiveSpark' }],
   },
   {
     code: 'ru',

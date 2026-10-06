@@ -12,14 +12,18 @@
 //! - arch     = os_info::architecture()，Apple Silicon 是 "arm64"（不是 std 的 aarch64）
 //! - terminal = codex_terminal_detection::user_agent()，终端程序名，缺省 "unknown"
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
 /// 官方默认 originator（codex-rs `DEFAULT_ORIGINATOR`）。
 pub const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 
-/// 探测不到本机 codex 版本时的兜底（取最近一次已知的官方发布版）。
-const DEFAULT_CODEX_VERSION: &str = "0.137.0";
+/// 探测不到本机 codex 版本时的兜底。
+///
+/// 这个值会随官方发布而过期；环境变量和本机 npm manifest 探测链才是正解。
+const DEFAULT_CODEX_VERSION: &str = "0.160.0";
 
 /// 完整 User-Agent，进程内只算一次。
 pub fn codex_user_agent() -> &'static str {
@@ -34,16 +38,17 @@ pub fn codex_user_agent() -> &'static str {
             arch(),
             terminal_token(),
         );
-        sanitize_header(raw)
+        let user_agent = sanitize_header(raw);
+        println!("[CodexUA] {}", user_agent);
+        user_agent
     })
     .as_str()
 }
 
-/// 本机安装的 codex 版本：先 `codex --version`，失败回退常量。
+/// 本机安装的 codex 版本：环境变量 → npm manifest → `codex --version` → 常量。
 fn codex_version() -> String {
     static VER: OnceLock<String> = OnceLock::new();
-    VER.get_or_init(|| detect_codex_version().unwrap_or_else(|| DEFAULT_CODEX_VERSION.to_string()))
-        .clone()
+    VER.get_or_init(detect_codex_version_or_default).clone()
 }
 
 #[cfg(windows)]
@@ -57,29 +62,144 @@ fn windows_version_command() -> Option<Command> {
     Some(command)
 }
 
+fn detect_codex_version_or_default() -> String {
+    detect_codex_version().unwrap_or_else(|| DEFAULT_CODEX_VERSION.to_string())
+}
+
 fn detect_codex_version() -> Option<String> {
-    #[cfg(windows)]
-    let out = windows_version_command()?.output().ok()?;
-    #[cfg(not(windows))]
-    let out = {
-        // GUI（.app）进程 PATH 很窄，手动补常见安装目录后再找 codex。
-        let mut path = std::env::var("PATH").unwrap_or_default();
-        for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-            path.push(':');
-            path.push_str(extra);
+    let env_version = std::env::var("CODEX_SWITCHER_CLIENT_VERSION").ok();
+    let binaries = codex_binary_candidates();
+    let npm_roots = npm_global_roots();
+    detect_codex_version_from_sources(
+        env_version.as_deref(),
+        &binaries,
+        &npm_roots,
+        run_codex_version,
+    )
+}
+
+fn detect_codex_version_from_sources<F>(
+    env_version: Option<&str>,
+    binaries: &[PathBuf],
+    npm_roots: &[PathBuf],
+    run_version: F,
+) -> Option<String>
+where
+    F: Fn(&Path) -> Option<String>,
+{
+    if let Some(version) = env_version.map(str::trim).filter(|value| !value.is_empty()) {
+        return Some(version.to_string());
+    }
+
+    for binary in binaries {
+        if let Some(version) = version_from_binary_manifest(binary) {
+            return Some(version);
         }
-        if let Ok(home) = std::env::var("HOME") {
-            for sub in [".local/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"] {
-                path.push(':');
-                path.push_str(&format!("{home}/{sub}"));
+    }
+    for root in npm_roots {
+        if let Some(version) = version_from_manifest(&root.join("@openai/codex/package.json")) {
+            return Some(version);
+        }
+    }
+    binaries.iter().find_map(|binary| run_version(binary))
+}
+
+fn version_from_binary_manifest(binary: &Path) -> Option<String> {
+    let resolved = binary.canonicalize().ok()?;
+    resolved
+        .ancestors()
+        .find_map(|parent| version_from_manifest(&parent.join("package.json")))
+}
+
+fn version_from_manifest(path: &Path) -> Option<String> {
+    let data: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    if data.get("name").and_then(|value| value.as_str()) != Some("@openai/codex") {
+        return None;
+    }
+    data.get("version")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn augmented_path() -> std::ffi::OsString {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    for extra in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        paths.push(PathBuf::from(extra));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for sub in [".local/bin", ".bun/bin", ".npm-global/bin", ".volta/bin"] {
+            paths.push(home.join(sub));
+        }
+    }
+    std::env::join_paths(paths).unwrap_or_default()
+}
+
+fn codex_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/codex"),
+        PathBuf::from("/usr/local/bin/codex"),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        candidates.extend(
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(if cfg!(windows) { "codex.cmd" } else { "codex" })),
+        );
+    }
+    candidates.push(PathBuf::from(if cfg!(windows) {
+        "codex.cmd"
+    } else {
+        "codex"
+    }));
+    dedupe_paths(candidates)
+}
+
+fn npm_global_roots() -> Vec<PathBuf> {
+    let path = augmented_path();
+    let mut roots = Vec::new();
+    for npm in ["/opt/homebrew/bin/npm", "/usr/local/bin/npm", "npm"] {
+        let Ok(out) = Command::new(npm)
+            .args(["root", "-g"])
+            .env("PATH", &path)
+            .output()
+        else {
+            continue;
+        };
+        if out.status.success() {
+            let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !root.is_empty() {
+                roots.push(PathBuf::from(root));
             }
         }
-        Command::new("codex")
-            .arg("--version")
-            .env("PATH", path)
-            .output()
-            .ok()?
+    }
+    dedupe_paths(roots)
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn run_codex_version(binary: &Path) -> Option<String> {
+    #[cfg(windows)]
+    let out = if binary.components().count() == 1 {
+        windows_version_command()?.output().ok()?
+    } else {
+        Command::new(binary).arg("--version").output().ok()?
     };
+    #[cfg(not(windows))]
+    let out = Command::new(binary)
+        .arg("--version")
+        .env("PATH", augmented_path())
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -187,5 +307,56 @@ mod windows_tests {
         assert_eq!(args, ["/D", "/V:OFF", "/C", "codex", "--version"]);
         assert_eq!(command.get_envs().count(), 0);
         assert!(command.get_program().to_string_lossy().ends_with("cmd.exe"));
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::*;
+
+    #[test]
+    fn environment_version_has_highest_priority() {
+        let version = detect_codex_version_from_sources(
+            Some(" 9.8.7 "),
+            &[PathBuf::from("/does/not/exist")],
+            &[],
+            |_| Some("1.2.3".to_string()),
+        );
+        assert_eq!(version.as_deref(), Some("9.8.7"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_version_from_symlinked_npm_manifest_without_running_launcher() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("codex-ua-test-{}", uuid::Uuid::new_v4()));
+        let package = root.join("lib/node_modules/@openai/codex");
+        let launcher = package.join("bin/codex.js");
+        let link = root.join("bin/codex");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(&launcher, "#!/usr/bin/env node\n").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            r#"{"name":"@openai/codex","version":"7.6.5"}"#,
+        )
+        .unwrap();
+        symlink(&launcher, &link).unwrap();
+
+        let version = detect_codex_version_from_sources(None, &[link], &[], |_| {
+            panic!("manifest detection must not execute the Node launcher")
+        });
+        assert_eq!(version.as_deref(), Some("7.6.5"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_pinned_version_when_all_detection_fails() {
+        let detected = detect_codex_version_from_sources(None, &[], &[], |_| None);
+        assert_eq!(
+            detected.unwrap_or_else(|| DEFAULT_CODEX_VERSION.to_string()),
+            DEFAULT_CODEX_VERSION
+        );
     }
 }

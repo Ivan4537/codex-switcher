@@ -321,12 +321,12 @@ export function AddRouteModal({ isOpen, accounts, onClose, onSuccess }: AddRoute
                                                                     {s.model}
                                                                 </span>
                                                             )}
-                                                            <span className="cs-route-session-row__cwd" title={s.cwd ?? ''}>
+                                                            <span className="cs-route-session-row__cwd" title={s.cwd ?? ''} translate="no">
                                                                 {basename(s.cwd) || '—'}
                                                             </span>
                                                         </div>
                                                         {s.first_user_text && (
-                                                            <div className="cs-route-session-row__preview">
+                                                            <div className="cs-route-session-row__preview" translate="no">
                                                                 {truncate(s.first_user_text, 80)}
                                                             </div>
                                                         )}
@@ -386,7 +386,7 @@ export function AddRouteModal({ isOpen, accounts, onClose, onSuccess }: AddRoute
                                                 onClick={() => setSelectedAccountId(a.id)}
                                             >
                                                 <span className="cs-route-account-row__radio" aria-hidden />
-                                                <span className="cs-route-account-row__name" title={a.name}>
+                                                <span className="cs-route-account-row__name" title={a.name} translate="no">
                                                     {a.name}
                                                 </span>
                                                 <span className={badge.className}>{badge.label}</span>

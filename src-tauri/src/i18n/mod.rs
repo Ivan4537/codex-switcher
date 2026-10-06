@@ -1,7 +1,9 @@
+mod en;
 mod ru;
 #[allow(dead_code)]
 mod zh_cn;
 
+use en::EnglishLocale;
 use ru::RussianLocale;
 use std::sync::RwLock;
 use zh_cn::ChineseLocale;
@@ -32,6 +34,7 @@ trait BackendLocale: Sync {
 
 const RUSSIAN_LOCALE: RussianLocale = RussianLocale;
 const CHINESE_LOCALE: ChineseLocale = ChineseLocale;
+const ENGLISH_LOCALE: EnglishLocale = EnglishLocale;
 
 struct BackendLocaleDefinition {
     code: &'static str,
@@ -40,6 +43,11 @@ struct BackendLocaleDefinition {
 }
 
 static BACKEND_LOCALES: &[BackendLocaleDefinition] = &[
+    BackendLocaleDefinition {
+        code: "en",
+        language_prefixes: &["en"],
+        locale: &ENGLISH_LOCALE,
+    },
     BackendLocaleDefinition {
         code: "zh-CN",
         language_prefixes: &["zh"],
@@ -216,4 +224,23 @@ pub fn referral_missing_items() -> &'static str {
 
 pub fn referral_no_available_campaign() -> &'static str {
     active_locale().referral_no_available_campaign()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::locale_by_code;
+
+    #[test]
+    fn english_native_ui_preserves_account_identity() {
+        let locale = locale_by_code("en").unwrap();
+        assert_eq!(locale.tray_show_main(), "Open main window");
+        assert!(locale.oauth_success_html().contains("lang=\"en\""));
+        assert!(locale
+            .tray_tooltip_account("生产账号A", 73.0, 42.0)
+            .contains("生产账号A"));
+        assert!(locale
+            .injected_switch_message("生产账号A")
+            .contains("生产账号A"));
+        assert!(locale_by_code("de").is_none());
+    }
 }

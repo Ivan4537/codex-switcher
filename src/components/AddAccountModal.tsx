@@ -244,6 +244,24 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
 
     useEffect(() => {
         if (!isOpen) return;
+
+        const unlisten = listen<string>('oauth-login-failed', (event) => {
+            linkGeneration.current++;
+            setAuthLink(null);
+            setCopyingLink(false);
+            setLinkCopyError(null);
+            setOauthStatus('');
+            setError(event.payload);
+            setLoading(false);
+        });
+
+        return () => {
+            unlisten.then(f => f());
+        };
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen) return;
         const unlisten = listen<string>('antigravity-oauth-callback-received', async (event) => {
             setOauthStatus('已获取 Google 授权码，正在验证账号和项目...');
             try {
@@ -363,10 +381,13 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
 
     const handleClose = () => {
         linkGeneration.current++;
+        void invoke('cancel_oauth_login').catch(err => {
+            console.warn('Failed to cancel pending OAuth login:', err);
+        });
         setAuthLink(null);
         setLinkCopyError(null);
         setCopyingLink(false);
-        // OAuth 进行中也允许关闭：后端 oauth_server 下次 start 时会 abort 旧任务，无需显式取消
+        // OAuth 进行中也允许关闭，并立即释放后端回调监听端口。
         setName('');
         setNotes('');
         setError(null);
@@ -627,7 +648,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                                 <tbody>
                                                     {sessionResult.ok.map((item, i) => (
                                                         <tr key={i}>
-                                                            <td>{item.info.email || item.account.name}</td>
+                                                            <td translate="no">{item.info.email || item.account.name}</td>
                                                             <td>{formatPlanLabel(item.info.plan_type) || '—'}</td>
                                                             <td>
                                                                 {item.info.has_refresh_token

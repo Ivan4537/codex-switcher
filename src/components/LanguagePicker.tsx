@@ -53,6 +53,11 @@ export function LanguagePicker() {
         <span aria-hidden="true">{activeLocale.flag}</span>
       </button>
       {open && <div className="language-picker-menu" role="menu">
+        <button type="button" role="menuitem" onClick={() => setLocalePreference(AUTO_LOCALE)}
+          className={preference === AUTO_LOCALE ? 'selected' : ''}>
+          <span>跟随系统</span>
+          {preference === AUTO_LOCALE && <Check size={14} aria-hidden="true" />}
+        </button>
         {appLocales.map(locale => {
           const isSelected = preference === locale.code || (
             preference === AUTO_LOCALE && activeLocale.code === locale.code
@@ -66,7 +71,7 @@ export function LanguagePicker() {
               onClick={() => setLocalePreference(locale.code)}
             >
               <span aria-hidden="true">{locale.flag}</span>
-              <span lang={locale.code}>{locale.nativeName}</span>
+              <span lang={locale.code} translate="no">{locale.nativeName}</span>
               {isSelected && <Check size={14} aria-hidden="true" />}
             </button>
           );

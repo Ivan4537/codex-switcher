@@ -736,7 +736,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                             <span className={`anchor-current ${anchorAccount ? 'bound' : 'unbound'}`}>
                                 {anchorAccount ? (
                                     <>
-                                        📱 {anchorAccount.name}
+                                        📱 <span translate="no">{anchorAccount.name}</span>
                                         <span className={`anchor-current-plan plan-${(anchorAccount.cached_quota?.plan_type || 'unknown').toLowerCase()}`}>
                                             {anchorAccount.cached_quota?.plan_type
                                                 ? formatPlanLabel(anchorAccount.cached_quota.plan_type)
@@ -832,7 +832,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                             onClick={() => handleBindAnchor(acc.id)}
                                             disabled={anchorBusy || acc.is_session_anchor}
                                         >
-                                            <span className="anchor-picker-name">{acc.name}</span>
+                                            <span className="anchor-picker-name" translate="no">{acc.name}</span>
                                             <span className={`anchor-picker-plan plan-${planClass}`}>{planLabel}</span>
                                             {acc.is_session_anchor && (
                                                 <span className="anchor-picker-tag">✓ 当前绑定</span>
@@ -873,13 +873,14 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                 .filter(locale => locale.translation && locale.contributors?.length)
                                 .map(locale => (
                                     <div className="translation-credit" key={locale.code}>
-                                        <span className="translation-credit-language" lang={locale.code}>
+                                        <span className="translation-credit-language" lang={locale.code} translate="no">
                                             <span aria-hidden="true">{locale.flag}</span>
                                             {locale.nativeName}
                                         </span>
                                         {locale.contributors?.map(contributor => contributor.url ? (
                                             <a
                                                 className="translation-contributor"
+                                                translate="no"
                                                 href={contributor.url}
                                                 key={contributor.name}
                                                 target="_blank"
@@ -889,7 +890,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                                 {contributor.name}
                                             </a>
                                         ) : (
-                                            <span className="translation-contributor" key={contributor.name}>
+                                            <span className="translation-contributor" key={contributor.name} translate="no">
                                                 {contributor.name}
                                             </span>
                                         ))}

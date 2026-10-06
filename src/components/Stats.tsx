@@ -40,6 +40,32 @@ interface TokenStats {
     total_requests: number;
 }
 
+interface TurnStateObservation {
+    observed_at: string;
+    account_id: string;
+    model: string;
+    session_key_hash: string | null;
+    source: string;
+    status: number;
+    length: number;
+    classification: string;
+    time_status: string;
+    envelope_ok: boolean;
+    blocks: number | null;
+    issued_at: string | null;
+    expires_at: string | null;
+    heuristic_usable: boolean;
+    fingerprint: string;
+}
+
+interface TurnStateStatus {
+    header: string;
+    total_observations: number;
+    by_classification: Record<string, number>;
+    last: TurnStateObservation | null;
+    recent: TurnStateObservation[];
+}
+
 interface PlanCapacityEstimate {
     plan_type: string;
     window_type: '5h' | 'week';
@@ -119,6 +145,7 @@ export function Stats() {
     const [switchHistory, setSwitchHistory] = useState<SwitchEvent[]>([]);
     const [switchStats, setSwitchStats] = useState<SwitchStats | null>(null);
     const [tokenStats, setTokenStats] = useState<TokenStats | null>(null);
+    const [turnStateStatus, setTurnStateStatus] = useState<TurnStateStatus | null>(null);
     const [planCaps, setPlanCaps] = useState<PlanCapacityEstimate[]>([]);
     const [accountHistory, setAccountHistory] = useState<AccountTokenHistory[]>([]);
     const [expandedAccount, setExpandedAccount] = useState<string | null>(null);
@@ -148,6 +175,24 @@ export function Stats() {
     };
 
     useEffect(() => { fetchData(); }, [range]);
+
+    useEffect(() => {
+        let disposed = false;
+        const refreshTurnState = async () => {
+            try {
+                const status = await invoke<TurnStateStatus>('get_turn_state_status');
+                if (!disposed) setTurnStateStatus(status);
+            } catch {
+                // The proxy may be stopped; keep the last read-only snapshot.
+            }
+        };
+        refreshTurnState();
+        const timer = window.setInterval(refreshTurnState, 5000);
+        return () => {
+            disposed = true;
+            window.clearInterval(timer);
+        };
+    }, []);
 
     // 聚合 token 趋势数据（按小时/天）
     const trendData = (() => {
@@ -220,6 +265,55 @@ export function Stats() {
                     <div className="stat-card-value">{accountCount}</div>
                     <div className="stat-card-label">使用账号数</div>
                 </div>
+            </div>
+
+            <div className="stats-section turn-state-section">
+                <h3>Turn-State 被动观测</h3>
+                <div className="turn-state-summary">
+                    <div>
+                        <span className="turn-state-value">{turnStateStatus?.total_observations ?? 0}</span>
+                        <span className="turn-state-label">响应头观测</span>
+                    </div>
+                    <div>
+                        <span className="turn-state-value good">{turnStateStatus?.by_classification.personal_normal ?? 0}</span>
+                        <span className="turn-state-label">292 正常</span>
+                    </div>
+                    <div>
+                        <span className="turn-state-value good">{turnStateStatus?.by_classification.team_normal ?? 0}</span>
+                        <span className="turn-state-label">332 Team</span>
+                    </div>
+                    <div>
+                        <span className="turn-state-value warn">{turnStateStatus?.by_classification.limited_or_degraded ?? 0}</span>
+                        <span className="turn-state-label">312/356 受限形状</span>
+                    </div>
+                    <div>
+                        <span className="turn-state-value muted">{(turnStateStatus?.by_classification.other_length ?? 0) + (turnStateStatus?.by_classification.malformed ?? 0) + (turnStateStatus?.by_classification.unknown_envelope ?? 0)}</span>
+                        <span className="turn-state-label">未知/异常</span>
+                    </div>
+                </div>
+                <div className="turn-state-note">
+                    仅读取上游响应头，不主动探测、不注入、不重放；长度和时间判断是经验性观测，不代表官方质量指标。
+                </div>
+                {turnStateStatus?.recent.length ? (
+                    <div className="turn-state-table">
+                        <div className="turn-state-row turn-state-header">
+                            <span>时间</span><span>账号 / 模型</span><span>形状</span><span>时间状态</span><span>来源</span>
+                        </div>
+                        {turnStateStatus.recent.slice(0, 8).map((item, index) => (
+                            <div className="turn-state-row" key={`${item.observed_at}-${item.fingerprint}-${index}`}>
+                                <span className="log-time">{formatTime(item.observed_at)}</span>
+                                <span title={item.account_id}>{shortName(item.account_id || '—')} / {item.model || '—'}</span>
+                                <span className={item.heuristic_usable ? 'turn-state-good' : 'turn-state-warn'}>
+                                    {turnStateLabel(item.classification)} ({item.length})
+                                </span>
+                                <span>{item.time_status}</span>
+                                <span>{item.source === 'websocket_handshake' ? 'WS 握手' : 'HTTP 响应'}</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <div className="log-empty">代理启动后，收到官方 ChatGPT HTTP/SSE 或 WebSocket 握手响应头才会出现观测。</div>
+                )}
             </div>
 
             {/* Plan 配额上限估算（基于 quota 快照 Δpct） */}
@@ -303,7 +397,7 @@ export function Stats() {
                                             {acc.is_banned && <span className="quota-badge banned">封</span>}
                                             {acc.is_token_invalid && <span className="quota-badge invalid">失效</span>}
                                             <span className={`quota-plan plan-${(acc.plan_type || 'unknown').toLowerCase()}`}>{formatPlanLabel(acc.plan_type) || '—'}</span>
-                                            <span className="acct-email-text">{acc.email}</span>
+                                            <span className="acct-email-text" translate="no">{acc.email}</span>
                                         </span>
                                         <CellPair cycle={acc.current_5h} />
                                         <CellPair cycle={acc.last_5h} />
@@ -481,6 +575,17 @@ export function Stats() {
 function shortName(name: string): string {
     if (name.length > 18) return name.slice(0, 15) + '...';
     return name;
+}
+
+function turnStateLabel(classification: string): string {
+    switch (classification) {
+        case 'personal_normal': return '292 正常';
+        case 'team_normal': return '332 Team';
+        case 'limited_or_degraded': return '受限';
+        case 'malformed': return '格式错误';
+        case 'unknown_envelope': return '未知封装';
+        default: return '其他长度';
+    }
 }
 
 function formatWindow(startSec: number, endSec: number): string {
