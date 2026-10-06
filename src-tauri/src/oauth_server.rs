@@ -7,7 +7,7 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use url::Url;
 
 /// 使用 OnceLock 代替 lazy_static 存储 OAuth 流程中的临时数据
@@ -132,62 +132,87 @@ pub async fn start_oauth_login(
 
 /// 监听回调
 async fn handle_callback(listener: TcpListener, app_handle: AppHandle, expected_state: String) {
-    let deadline = Instant::now() + CALLBACK_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            eprintln!("[OAuth] 回调监听超时，未收到有效授权码");
-            clear_pending_login(Some(&expected_state));
-            notify_login_failed(&app_handle, "OpenAI 授权已超时，请重新发起登录。");
-            return;
-        }
-
-        let accepted = match tokio::time::timeout(remaining, listener.accept()).await {
-            Ok(result) => result,
-            Err(_) => {
-                eprintln!("[OAuth] 回调监听超时，未收到有效授权码");
-                clear_pending_login(Some(&expected_state));
-                notify_login_failed(&app_handle, "OpenAI 授权已超时，请重新发起登录。");
-                return;
+    match wait_for_callback(listener, &expected_state, CALLBACK_TIMEOUT).await {
+        Ok(code) => {
+            if let Err(e) = app_handle.emit("oauth-callback-received", code) {
+                eprintln!("发送 oauth-callback-received 事件失败: {}", e);
             }
-        };
+        }
+        Err(message) => {
+            clear_pending_login(Some(&expected_state));
+            notify_login_failed(&app_handle, &message);
+        }
+    }
+}
 
-        let (mut socket, _) = match accepted {
+/// The deadline covers accept, request reads and response writes. A TCP client
+/// that connects without sending a callback must not keep OAuth alive forever.
+async fn wait_for_callback(
+    listener: TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    tokio::time::timeout(timeout, receive_callback(&listener, expected_state))
+        .await
+        .map_err(|_| "OpenAI 授权已超时，请重新发起登录。".to_string())?
+}
+
+async fn receive_callback(listener: &TcpListener, expected_state: &str) -> Result<String, String> {
+    loop {
+        let (mut socket, _) = match listener.accept().await {
             Ok(sock) => sock,
             Err(e) => {
-                eprintln!("[OAuth] 监听回调连接失败: {}", e);
-                continue;
+                return Err(format!("无法监听 OpenAI 授权回调: {}", e));
             }
         };
 
         let mut buffer = [0; 4096];
-        let n = match socket.read(&mut buffer).await {
-            Ok(n) => n,
-            Err(e) => {
+        let request_read = async {
+            let mut n = 0;
+            while n < buffer.len() {
+                let read = socket.read(&mut buffer[n..]).await?;
+                if read == 0 {
+                    break;
+                }
+                n += read;
+                if buffer[..n].windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Ok::<usize, std::io::Error>(n)
+        };
+        let n = match tokio::time::timeout(Duration::from_secs(5), request_read).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => {
                 eprintln!("[OAuth] 读取回调请求失败: {}", e);
                 continue;
             }
+            Err(_) => continue,
         };
         if n == 0 {
             continue;
         }
         let request = String::from_utf8_lossy(&buffer[..n]);
 
-        if let Some(code) = extract_oauth_code_from_request(&request, &expected_state) {
+        if let Some(code) = extract_oauth_code_from_request(&request, expected_state) {
             // 发送成功 HTML 并通知前端
             let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
                 <html><body><h1>授权成功</h1><p>已成功连接 OpenAI，你可以关闭此窗口并回到应用。</p>\
                 <script>setTimeout(() => window.close(), 3000)</script></body></html>";
-            let _ = socket.write_all(response.as_bytes()).await;
-
-            if let Err(e) = app_handle.emit("oauth-callback-received", code) {
-                eprintln!("发送 oauth-callback-received 事件失败: {}", e);
-            }
-            return;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                socket.write_all(response.as_bytes()),
+            )
+            .await;
+            return Ok(code);
         }
 
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n授权失败: State 校验不通过或参数缺失";
-        let _ = socket.write_all(response.as_bytes()).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            socket.write_all(response.as_bytes()),
+        )
+        .await;
     }
 }
 
@@ -200,6 +225,7 @@ pub async fn cancel_oauth_login() -> Result<(), String> {
         .take();
     if let Some(task) = task {
         task.abort();
+        let _ = task.await;
     }
     clear_pending_login(None);
     Ok(())
@@ -359,7 +385,41 @@ pub async fn complete_oauth_login(code: String) -> Result<oauth::TokenResponse, 
 
 #[cfg(test)]
 mod tests {
-    use super::extract_oauth_code_from_request;
+    use super::{extract_oauth_code_from_request, wait_for_callback};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::Duration;
+
+    #[tokio::test]
+    async fn silent_callback_connection_times_out_and_releases_listener_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _silent_client = TcpStream::connect(address).await.unwrap();
+        let result = wait_for_callback(listener, "s1", Duration::from_millis(50)).await;
+        assert!(result.unwrap_err().contains("超时"));
+        let _rebound = TcpListener::bind(address).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fragmented_callback_headers_are_received_before_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task =
+            tokio::spawn(
+                async move { wait_for_callback(listener, "s1", Duration::from_secs(2)).await },
+            );
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET /auth/callback?code=abc")
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+        client
+            .write_all(b"123&state=s1 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), "abc123");
+    }
 
     #[test]
     fn extract_code_success_when_state_matches() {
