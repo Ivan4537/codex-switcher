@@ -78,7 +78,7 @@ export function Dashboard({
             {/* 问候语 */}
             <div className="dashboard-greeting">
                 <h2>
-                    你好, {currentAccount?.name.split('@')[0] || '用户'} 👋
+                    你好, <span translate="no">{currentAccount?.name.split('@')[0] || '用户'}</span> 👋
                 </h2>
             </div>
 
@@ -92,8 +92,8 @@ export function Dashboard({
                         <span className="banner-icon">📱</span>
                         <div className="banner-text">
                             <strong>手机锚生效：</strong>
-                            Codex.app 仍以 <span>{anchorAccount.name}</span> 身份在线（手机 bridge 不掉线），
-                            代理出口已切到 <b>{currentAccount?.name}</b>。
+                            Codex.app 仍以 <span translate="no">{anchorAccount.name}</span> 身份在线（手机 bridge 不掉线），
+                            代理出口已切到 <b translate="no">{currentAccount?.name}</b>。
                         </div>
                     </div>
                 </div>
@@ -147,7 +147,7 @@ export function Dashboard({
                         <div className="current-account-content">
                             <div className="account-info">
                                 <span className="email-icon">✉</span>
-                                <span className="email">{currentAccount.name}</span>
+                                <span className="email" translate="no">{currentAccount.name}</span>
                                 {usage?.plan_type && (
                                     <span className="plan-badge">{formatPlanLabel(usage.plan_type)}</span>
                                 )}

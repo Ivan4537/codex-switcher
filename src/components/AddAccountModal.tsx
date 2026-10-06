@@ -648,7 +648,7 @@ export function AddAccountModal({ isOpen, onClose, onAdd, onSuccess }: AddAccoun
                                                 <tbody>
                                                     {sessionResult.ok.map((item, i) => (
                                                         <tr key={i}>
-                                                            <td>{item.info.email || item.account.name}</td>
+                                                            <td translate="no">{item.info.email || item.account.name}</td>
                                                             <td>{formatPlanLabel(item.info.plan_type) || '—'}</td>
                                                             <td>
                                                                 {item.info.has_refresh_token

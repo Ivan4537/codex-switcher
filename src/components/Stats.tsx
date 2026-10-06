@@ -397,7 +397,7 @@ export function Stats() {
                                             {acc.is_banned && <span className="quota-badge banned">封</span>}
                                             {acc.is_token_invalid && <span className="quota-badge invalid">失效</span>}
                                             <span className={`quota-plan plan-${(acc.plan_type || 'unknown').toLowerCase()}`}>{formatPlanLabel(acc.plan_type) || '—'}</span>
-                                            <span className="acct-email-text">{acc.email}</span>
+                                            <span className="acct-email-text" translate="no">{acc.email}</span>
                                         </span>
                                         <CellPair cycle={acc.current_5h} />
                                         <CellPair cycle={acc.last_5h} />

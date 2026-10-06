@@ -80,7 +80,7 @@ export function RelayImportConfirm() {
             <tbody>
               <tr>
                 <td style={{ color: '#6b7280', padding: '4px 8px 4px 0', verticalAlign: 'top' }}>名称</td>
-                <td style={{ padding: '4px 0', wordBreak: 'break-all' }}>{pending.name}</td>
+                <td translate="no" style={{ padding: '4px 0', wordBreak: 'break-all' }}>{pending.name}</td>
               </tr>
               <tr>
                 <td style={{ color: '#6b7280', padding: '4px 8px 4px 0', verticalAlign: 'top' }}>Base URL</td>

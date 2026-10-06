@@ -215,7 +215,7 @@ export function SessionRoutes() {
                                         />
                                         <span className="sr-switch__slider" />
                                     </label>
-                                    <span className="sr-card__label" title={r.label ?? r.session_id}>
+                                    <span className="sr-card__label" title={r.label ?? r.session_id} translate="no">
                                         {label}
                                     </span>
                                     <div className="sr-card__actions">
@@ -251,7 +251,7 @@ export function SessionRoutes() {
                                     <span className="sr-card__arrow">→</span>
                                     {acc ? (
                                         <>
-                                            <span className="sr-card__account-name">{acc.name}</span>
+                                            <span className="sr-card__account-name" translate="no">{acc.name}</span>
                                             {badge && <span className={badge.className}>{badge.label}</span>}
                                         </>
                                     ) : (
@@ -328,7 +328,7 @@ export function SessionRoutes() {
                 title="确认删除路由"
                 message={
                     <>
-                        <p>确认删除路由「{deleteTarget?.label || shortSessionId(deleteTarget?.session_id ?? '')}」？</p>
+                        <p>确认删除路由「<span translate="no">{deleteTarget?.label || shortSessionId(deleteTarget?.session_id ?? '')}</span>」？</p>
                         <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>
                             删除后该 session 将恢复全局自动切号。
                         </p>
