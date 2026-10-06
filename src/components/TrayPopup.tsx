@@ -186,7 +186,7 @@ export function TrayPopup() {
             {/* Account */}
             {data?.account && (
                 <div className="tp-account">
-                    {data.account.name}
+                    <span translate="no">{data.account.name}</span>
                     <span className="tp-plan">{formatPlanLabel(q?.plan_type) || '-'}</span>
                     {data.account.is_banned && <span className="tp-banned">封号</span>}
                     {data.account.is_logged_out && !data.account.is_banned && <span className="tp-logged-out">需重登</span>}
@@ -199,7 +199,7 @@ export function TrayPopup() {
                 <div className="tp-anchor">
                     <span className="tp-anchor-icon">📱</span>
                     <span className="tp-anchor-text">
-                        手机锚 <b>{data.anchor.name}</b> · 代理出口 <b>{data.account?.name}</b>
+                        手机锚 <b translate="no">{data.anchor.name}</b> · 代理出口 <b translate="no">{data.account?.name}</b>
                     </span>
                 </div>
             )}

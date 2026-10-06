@@ -57,3 +57,30 @@ test('complete messages win over fragment replacements', () => {
     'Режим Fast включён: ответы быстрее, расход квоты удвоен. Перезапустите Codex для применения',
   );
 });
+
+test('runtime leaves opted-out user text and attributes unchanged', () => {
+  const source = fs.readFileSync('src/i18n/runtime.ts', 'utf8')
+    + '\nexport { translateTextNode, translateElementAttributes };';
+  const loaded = { exports: {} };
+  vm.runInNewContext(ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText, { module: loaded, exports: loaded.exports });
+  const { translateTextNode, translateElementAttributes } = loaded.exports;
+  const locale = { translate: translateRu };
+  for (const marker of ['[translate="no"]', '[data-i18n-ignore]']) {
+    const attributes = new Map([['title', '生产账号A']]);
+    const parent = {
+      closest: selector => selector.includes(marker) ? parent : null,
+      getAttribute: key => attributes.get(key),
+      setAttribute: (key, value) => attributes.set(key, value),
+    };
+    const text = { data: '生产账号A', parentElement: parent };
+    translateTextNode(text, locale);
+    translateElementAttributes(parent, locale);
+    assert.equal(text.data, '生产账号A');
+    assert.equal(attributes.get('title'), '生产账号A');
+  }
+  const text = { data: '账号', parentElement: { closest: () => null } };
+  translateTextNode(text, locale);
+  assert.equal(text.data, 'Аккаунт');
+});

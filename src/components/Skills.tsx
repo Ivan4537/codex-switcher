@@ -315,11 +315,11 @@ export function Skills() {
                         ) : filtered.map(skill => (
                             <div key={skill.id} className="skill-card" onClick={() => handleOpenDetail(skill)} style={{ cursor: 'pointer' }}>
                                 <div className="skill-info">
-                                    <div className="skill-name">{skill.name}</div>
-                                    <div className="skill-desc">{skill.description || '无描述'}</div>
+                                    <div className="skill-name" translate="no">{skill.name}</div>
+                                    <div className="skill-desc" translate="no">{skill.description || '无描述'}</div>
                                     <div className="skill-meta">
                                         {skill.source === 'github' && skill.repo_owner && (
-                                            <span className="skill-source">{skill.repo_owner}/{skill.repo_name}</span>
+                                            <span className="skill-source" translate="no">{skill.repo_owner}/{skill.repo_name}</span>
                                         )}
                                         {skill.source === 'local' && <span className="skill-source">本地</span>}
                                     </div>
@@ -347,10 +347,10 @@ export function Skills() {
                     {filteredDiscover.map(skill => (
                         <div key={skill.key} className="skill-card">
                             <div className="skill-info">
-                                <div className="skill-name">{skill.name}</div>
-                                <div className="skill-desc">{skill.description || '无描述'}</div>
+                                <div className="skill-name" translate="no">{skill.name}</div>
+                                <div className="skill-desc" translate="no">{skill.description || '无描述'}</div>
                                 <div className="skill-meta">
-                                    <span className="skill-source">{skill.repo_owner}/{skill.repo_name}</span>
+                                    <span className="skill-source" translate="no">{skill.repo_owner}/{skill.repo_name}</span>
                                 </div>
                             </div>
                             {skill.installed ? (
@@ -376,7 +376,7 @@ export function Skills() {
                         {repos.map(repo => (
                             <div key={`${repo.owner}/${repo.name}`} className="repo-item">
                                 <div className="repo-info">
-                                    <span className="repo-name">{repo.owner}/{repo.name}</span>
+                                    <span className="repo-name" translate="no">{repo.owner}/{repo.name}</span>
                                     <span className="repo-branch">{repo.branch}</span>
                                 </div>
                                 <button
@@ -406,7 +406,7 @@ export function Skills() {
                             <button className="detail-close" onClick={() => setConfirmDelete(null)}>✕</button>
                         </div>
                         <div className="detail-content">
-                            <p>即将卸载 <strong>{confirmDelete.name}</strong>，此操作将从所有 CLI 目录移除该 skill。</p>
+                            <p>即将卸载 <strong translate="no">{confirmDelete.name}</strong>，此操作将从所有 CLI 目录移除该 skill。</p>
                             <p style={{ marginTop: '12px', color: 'var(--text-secondary)' }}>
                                 请输入 skill 名称 <code>{confirmDelete.name}</code> 以确认：
                             </p>
@@ -445,8 +445,8 @@ export function Skills() {
                     <div className="skill-detail-modal" onClick={e => e.stopPropagation()}>
                         <div className="detail-header">
                             <div>
-                                <h2>{detailSkill.name}</h2>
-                                <p className="detail-desc">{detailSkill.description}</p>
+                                <h2 translate="no">{detailSkill.name}</h2>
+                                <p className="detail-desc" translate="no">{detailSkill.description}</p>
                             </div>
                             <button className="detail-close" onClick={() => setDetailSkill(null)}>✕</button>
                         </div>

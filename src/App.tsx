@@ -486,7 +486,7 @@ function App() {
           <>
             <p>检测到官方 Codex 插件中存在未同步的 Token 更新。</p>
             <p>当前的账号状态与官方文件不一致：</p>
-            <span className="confirm-account-name">{conflictAccountName || '当前账号'}</span>
+            <span className="confirm-account-name" translate="no">{conflictAccountName || '当前账号'}</span>
             <p style={{ marginTop: '12px' }}>
               直接切换将<b>覆盖</b>官方插件中的当前登录状态，且无法找回这些未同步的更新。
             </p>

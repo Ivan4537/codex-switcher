@@ -473,33 +473,7 @@ pub fn responses_url(base: &str) -> Result<String, String> {
 
 /// Preserve the native protocol and history. Only the catalog slug is internal.
 pub fn request_body(raw: &[u8], model: &Model) -> Result<Vec<u8>, String> {
-    request_body_with_compaction(raw, model, false)
-}
-
-fn request_contains_compaction_trigger(value: &Value) -> bool {
-    value
-        .get("input")
-        .and_then(Value::as_array)
-        .is_some_and(|input| {
-            input
-                .iter()
-                .any(|item| item.get("type").and_then(Value::as_str) == Some("compaction_trigger"))
-        })
-}
-
-/// Build a native Responses payload, optionally preserving ChatGPT's private
-/// compaction items for the dedicated `/responses/compact` endpoint.
-fn request_body_with_compaction(
-    raw: &[u8],
-    model: &Model,
-    preserve_compaction: bool,
-) -> Result<Vec<u8>, String> {
     let mut value: Value = serde_json::from_slice(raw).map_err(|e| e.to_string())?;
-    // Current Codex remote compaction v2 uses the normal `/responses` endpoint
-    // with a `compaction_trigger` input item. Preserve the complete opaque
-    // compaction round-trip for native Responses relays; older non-native
-    // requests still use the compatibility filter below.
-    let preserve_compaction = preserve_compaction || request_contains_compaction_trigger(&value);
     let requested_effort = value
         .pointer("/reasoning/effort")
         .or_else(|| value.get("reasoning_effort"))
@@ -527,33 +501,9 @@ fn request_body_with_compaction(
         model.upstream.clone()
     };
     value["model"] = json!(actual_model);
-    // ChatGPT 私有历史 item：compaction_trigger 是空载请求控制标记，
-    // compaction/context_compaction 的摘要只有 ChatGPT 后端能解密。
-    // 第三方 Responses 端点会严格校验直接 400（Kimi: item type
-    // "compaction_trigger" is not supported），relay 只能丢弃。
-    if !preserve_compaction {
-        if let Some(input) = value.get_mut("input").and_then(Value::as_array_mut) {
-            let before = input.len();
-            input.retain(|item| {
-                !matches!(
-                    item.get("type").and_then(Value::as_str),
-                    Some(
-                        "compaction_trigger"
-                            | "compaction"
-                            | "compaction_summary"
-                            | "context_compaction"
-                    )
-                )
-            });
-            let dropped = before - input.len();
-            if dropped > 0 {
-                println!(
-                    "[relay_catalog] {}: 丢弃 {} 个 ChatGPT 私有 compaction item",
-                    model.upstream, dropped
-                );
-            }
-        }
-    }
+    // Compaction output is conversation history, including on subsequent turns
+    // without a compaction_trigger. Let the upstream validate opaque items;
+    // silently removing them loses the only remaining record of prior context.
     if model.upstream == "kimi-k3" || model.kimi_coding {
         if value.pointer("/tool_choice/type").and_then(Value::as_str) == Some("tool_search") {
             return Err(
@@ -686,9 +636,8 @@ pub async fn forward_native(
     forward_native_with_compaction(client, base, key, raw, model, false).await
 }
 
-/// Forward a native Responses compaction request without dropping its opaque
-/// compaction item. Third-party Responses relays may reject these items on the
-/// normal endpoint, so this is only used for `/responses/compact`.
+/// Forward to the dedicated compact endpoint, preserving the same opaque
+/// conversation history as ordinary native Responses requests.
 pub async fn forward_native_compact(
     client: &reqwest::Client,
     base: &str,
@@ -719,7 +668,7 @@ async fn forward_native_with_compaction(
         .header("accept", "application/json, text/event-stream")
         .header("accept-encoding", "identity")
         .header("user-agent", "codex-switcher-relay/1.0")
-        .body(request_body_with_compaction(raw, model, compact)?)
+        .body(request_body(raw, model)?)
         .send()
         .await
         .map_err(|e| format!("Relay connection failed: {e}"))
@@ -804,6 +753,22 @@ mod tests {
     }
 
     #[test]
+    fn relay_preserves_compacted_history_on_followup_without_trigger() {
+        let mut model = models(&store()).pop().unwrap();
+        model.upstream = "native-responses".into();
+        let payload = json!({"model":model.slug,"input":[
+            {"type":"compaction","id":"cmp_1","encrypted_content":"opaque-context"},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+        ]});
+        let result: Value = serde_json::from_slice(
+            &request_body(&serde_json::to_vec(&payload).unwrap(), &model).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["input"], payload["input"]);
+        assert_eq!(result["model"], "native-responses");
+    }
+
+    #[test]
     fn compact_request_preserves_chatgpt_compaction_items() {
         let mut model = models(&store()).pop().unwrap();
         model.upstream = "native-responses".into();
@@ -814,8 +779,7 @@ mod tests {
             {"type":"context_compaction","encrypted_content":"dGVzdA=="},
         ]});
         let result: Value = serde_json::from_slice(
-            &request_body_with_compaction(&serde_json::to_vec(&payload).unwrap(), &model, true)
-                .unwrap(),
+            &request_body(&serde_json::to_vec(&payload).unwrap(), &model).unwrap(),
         )
         .unwrap();
         assert_eq!(result["input"], payload["input"]);

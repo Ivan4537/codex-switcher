@@ -735,7 +735,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                             <span className={`anchor-current ${anchorAccount ? 'bound' : 'unbound'}`}>
                                 {anchorAccount ? (
                                     <>
-                                        📱 {anchorAccount.name}
+                                        📱 <span translate="no">{anchorAccount.name}</span>
                                         <span className={`anchor-current-plan plan-${(anchorAccount.cached_quota?.plan_type || 'unknown').toLowerCase()}`}>
                                             {anchorAccount.cached_quota?.plan_type
                                                 ? formatPlanLabel(anchorAccount.cached_quota.plan_type)
@@ -831,7 +831,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                             onClick={() => handleBindAnchor(acc.id)}
                                             disabled={anchorBusy || acc.is_session_anchor}
                                         >
-                                            <span className="anchor-picker-name">{acc.name}</span>
+                                            <span className="anchor-picker-name" translate="no">{acc.name}</span>
                                             <span className={`anchor-picker-plan plan-${planClass}`}>{planLabel}</span>
                                             {acc.is_session_anchor && (
                                                 <span className="anchor-picker-tag">✓ 当前绑定</span>

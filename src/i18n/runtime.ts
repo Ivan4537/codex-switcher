@@ -5,15 +5,17 @@ export interface UiLocale {
 }
 
 const translatedMark = 'data-ui-locale';
+const untranslatedSelector = 'script, style, textarea, input, code, pre, [translate="no"], [data-i18n-ignore]';
 
 function translateTextNode(node: Text, locale: UiLocale) {
   const parent = node.parentElement;
-  if (!parent || parent.closest('script, style, textarea, input, code, pre')) return;
+  if (!parent || parent.closest(untranslatedSelector)) return;
   const translated = locale.translate(node.data);
   if (translated !== node.data) node.data = translated;
 }
 
 function translateElementAttributes(element: Element, locale: UiLocale) {
+  if (element.closest('[translate="no"], [data-i18n-ignore]')) return;
   for (const attr of ['title', 'placeholder', 'aria-label', 'alt']) {
     const value = element.getAttribute(attr);
     if (!value) continue;

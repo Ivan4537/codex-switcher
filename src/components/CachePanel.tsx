@@ -325,7 +325,7 @@ export default function CachePanel({ accounts }: Props) {
                         <tbody>
                             {perAccount.map(a => (
                                 <tr key={a.id} className={a.isUnknown ? 'cache-row-unknown' : ''}>
-                                    <td className="cache-table-name" title={a.isUnknown ? '本字段是这次新增的，旧条目里没有，不能事后追溯' : a.id}>{a.name}</td>
+                                    <td className="cache-table-name" title={a.isUnknown ? '本字段是这次新增的，旧条目里没有，不能事后追溯' : a.id}><span translate="no">{a.name}</span></td>
                                     <td>{a.requests}</td>
                                     <td>{formatTokens(a.input)}</td>
                                     <td className="cache-cached">{formatTokens(a.cached)}</td>
@@ -368,7 +368,7 @@ export default function CachePanel({ accounts }: Props) {
                                                 : b.session_key}
                                         </td>
                                         <td className="cache-table-name" title={b.account_id}>
-                                            {accountNameById[b.account_id] || b.account_id}
+                                            <span translate="no">{accountNameById[b.account_id] || b.account_id}</span>
                                         </td>
                                         <td>{b.hit_count}</td>
                                         <td>{formatTokens(b.total_cached_tokens)}</td>

@@ -1,6 +1,6 @@
 [package]
 name = "codex-switcher"
-version = "0.7.19"
+version = "0.7.20"
 description = "Codex 多账号智能切换 + 本地代理 + 用量统计"
 authors = ["xiaojian"]
 edition = "2021"
@@ -24,7 +24,7 @@ serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json", "stream", "cookies"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "cookies", "http2", "charset", "macos-system-configuration", "rustls-tls", "rustls-tls-native-roots"] }
 regex = "1"
 tokio = { version = "1", features = ["full"] }
 hyper = { version = "1", features = ["server", "http1"] }
@@ -32,7 +32,7 @@ hyper-util = { version = "0.1", features = ["tokio", "http1"] }
 http-body-util = "0.1"
 bytes = "1"
 futures-util = "0.3"
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 zip = "2"
 url = "2"
 base64 = "0.22.1"

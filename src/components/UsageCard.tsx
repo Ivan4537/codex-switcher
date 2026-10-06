@@ -11,6 +11,9 @@ interface UsageCardProps {
 
 
 export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) {
+    const fiveHourTimeLeft = useCountdown(usage?.five_hour_reset_at);
+    const weeklyTimeLeft = useCountdown(usage?.weekly_reset_at);
+
     if (loading && !usage) {
         return (
             <div className="usage-inline loading">
@@ -35,9 +38,7 @@ export function UsageCard({ usage, loading, error, onRefresh }: UsageCardProps) 
         return null;
     }
 
-    const fiveHourTimeLeft = useCountdown(usage.five_hour_reset_at);
-    const weeklyTimeLeft = useCountdown(usage.weekly_reset_at);
-    const isFree = usage.plan_type === 'free';
+    const isFree = usage.plan_type.trim().toLowerCase() === 'free';
 
     return (
         <div className="usage-meters">
