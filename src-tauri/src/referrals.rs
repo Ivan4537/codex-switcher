@@ -2,6 +2,91 @@
 //! This API is separate from banked wham/rate-limit-reset-credits.
 use serde_json::{json, Value};
 use std::time::Duration;
+use tauri_plugin_opener::OpenerExt;
+
+#[tauri::command]
+pub fn open_official_referral_client(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener()
+        .open_url("codex://", None::<String>)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_response(
+    status: u16,
+    challenged: bool,
+    body: &str,
+    sending: bool,
+) -> Result<Value, String> {
+    let uncertain = if sending {
+        crate::i18n::referral_uncertain_send_suffix()
+    } else {
+        ""
+    };
+    if challenged
+        || (status == 403 && (body.contains("challenge-platform") || body.contains("cf-chl-")))
+    {
+        return Err(format!("邀请查询被网页防护拦截，资格和剩余次数未确认；这不代表没有活动。可在官方 ChatGPT Desktop 查看并邀请。{uncertain}"));
+    }
+    let data: Value = serde_json::from_str(body)
+        .map_err(|_| crate::i18n::referral_non_json_response(status, uncertain))?;
+    if !(200..300).contains(&status) {
+        let detail = data.get("detail").unwrap_or(&data);
+        let message = detail
+            .as_str()
+            .or_else(|| detail.get("message").and_then(Value::as_str))
+            .unwrap_or(crate::i18n::referral_upstream_rejected());
+        let failed = detail
+            .get("failed_emails")
+            .or_else(|| data.get("failed_emails"));
+        return Err(format!(
+            "HTTP {status}: {message}{}{}",
+            failed
+                .map(crate::i18n::referral_failed_emails)
+                .unwrap_or_default(),
+            uncertain
+        ));
+    }
+    if !data.is_object() {
+        return Err(crate::i18n::referral_unrecognized_response(uncertain));
+    }
+    Ok(data)
+}
+
+pub(crate) fn validate_eligibility(data: Value) -> Result<Value, String> {
+    if data
+        .get("grants")
+        .filter(|value| !value.is_null())
+        .is_some_and(|value| {
+            !value
+                .as_array()
+                .is_some_and(|grants| grants.iter().all(Value::is_object))
+        })
+        || data
+            .get("remaining_reward_capacity")
+            .filter(|value| !value.is_null())
+            .is_some_and(|value| value.as_u64().is_none())
+        || data
+            .get("offer_id")
+            .filter(|value| !value.is_null())
+            .is_some_and(|value| !value.is_string())
+    {
+        return Err(
+            "邀请资格响应不完整，活动和剩余次数未确认，请重试或在官方 Desktop 查看。".into(),
+        );
+    }
+    match data.get("should_show").and_then(Value::as_bool) {
+        Some(false) => Ok(data),
+        Some(true)
+            if data
+                .get("remaining_send_capacity")
+                .and_then(Value::as_u64)
+                .is_some() =>
+        {
+            Ok(data)
+        }
+        _ => Err("邀请资格响应不完整，活动和剩余次数未确认，请重试或在官方 Desktop 查看。".into()),
+    }
+}
 
 fn context(program: &str) -> Result<Value, String> {
     match program {
@@ -44,46 +129,30 @@ async fn response(req: reqwest::RequestBuilder, sending: bool) -> Result<Value, 
         .send()
         .await
         .map_err(|e| crate::i18n::referral_network_error(&e, uncertain))?;
-    let status = resp.status();
-    let data = resp
-        .json::<Value>()
+    let status = resp.status().as_u16();
+    let challenged = resp
+        .headers()
+        .get("cf-mitigated")
+        .and_then(|value| value.to_str().ok())
+        == Some("challenge");
+    let body = resp
+        .text()
         .await
-        .map_err(|_| crate::i18n::referral_non_json_response(status.as_u16(), uncertain))?;
-    if !status.is_success() {
-        let detail = data.get("detail").unwrap_or(&data);
-        let message = detail
-            .as_str()
-            .or_else(|| detail.get("message").and_then(Value::as_str))
-            .unwrap_or(crate::i18n::referral_upstream_rejected());
-        let failed = detail
-            .get("failed_emails")
-            .or_else(|| data.get("failed_emails"));
-        return Err(format!(
-            "HTTP {}: {}{}{}",
-            status.as_u16(),
-            message,
-            failed
-                .map(crate::i18n::referral_failed_emails)
-                .unwrap_or_default(),
-            uncertain
-        ));
-    }
-    if !data.is_object() {
-        return Err(crate::i18n::referral_unrecognized_response(uncertain));
-    }
-    Ok(data)
+        .map_err(|e| crate::i18n::referral_network_error(&e, uncertain))?;
+    parse_response(status, challenged, &body, sending)
 }
 
 pub async fn eligibility(token: &str, aid: Option<&str>, program: &str) -> Result<Value, String> {
     let ctx = context(program)?;
-    response(
+    let data = response(
         request(token, aid, reqwest::Method::GET, "/eligibility").query(&[
             ("program_id", ctx["program_id"].as_str().unwrap()),
             ("entrypoint", "persistent"),
         ]),
         false,
     )
-    .await
+    .await?;
+    validate_eligibility(data)
 }
 
 pub async fn tracking(
@@ -130,13 +199,6 @@ fn send_body(
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty() && seen.insert(e.to_lowercase()))
         .collect();
-    if offer
-        .get("remaining_reward_capacity")
-        .and_then(Value::as_u64)
-        == Some(0)
-    {
-        return Err("当前没有剩余奖励名额，已阻止发送邀请".into());
-    }
     let mut cap = offer["remaining_send_capacity"]
         .as_u64()
         .unwrap_or(0)
@@ -225,5 +287,33 @@ mod tests {
             &n,
         )
         .is_err());
+    }
+
+    #[test]
+    fn challenge_and_incomplete_response_never_mean_ineligible() {
+        let error = parse_response(403, true, "<html>challenge</html>", false).unwrap_err();
+        assert!(error.contains("未确认"));
+        assert!(validate_eligibility(json!({})).is_err());
+        assert!(validate_eligibility(json!({"should_show":true})).is_err());
+        assert!(validate_eligibility(
+            json!({"should_show":true,"remaining_send_capacity":3,"grants":{}})
+        )
+        .is_err());
+        assert!(validate_eligibility(json!({"should_show":false})).is_ok());
+        let error = parse_response(403, true, "<html>challenge</html>", true).unwrap_err();
+        assert!(error.contains("勿直接重发") || error.contains("retrying"));
+    }
+
+    #[test]
+    fn rewardless_invites_keep_official_send_capacity() {
+        let offer = json!({"should_show":true,"remaining_send_capacity":3,"remaining_reward_capacity":0,"grants":[],"offer_id":"none"});
+        let body = send_body(
+            "codex_referral_consumer",
+            vec!["a@example.com".into()],
+            &offer,
+            &offer,
+        )
+        .unwrap();
+        assert_eq!(body["emails"], json!(["a@example.com"]));
     }
 }

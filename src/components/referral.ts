@@ -5,12 +5,25 @@ export interface ReferralGrant {
 }
 
 export interface ReferralOffer {
+    query_source?: 'verified_browser';
     should_show?: boolean;
     offer_id?: string | null;
     grants?: ReferralGrant[];
     remaining_send_capacity?: number;
     remaining_reward_capacity?: number;
     requires_explicit_confirmation?: boolean;
+}
+
+export function parseReferralOffer(value: unknown): ReferralOffer {
+    const offer = value as ReferralOffer | null;
+    if (!offer || typeof offer !== 'object' || typeof offer.should_show !== 'boolean'
+        || (offer.should_show && (!Number.isInteger(offer.remaining_send_capacity) || (offer.remaining_send_capacity ?? -1) < 0))
+        || (offer.grants != null && (!Array.isArray(offer.grants) || offer.grants.some(grant => !grant || typeof grant !== 'object')))
+        || (offer.remaining_reward_capacity != null && (!Number.isInteger(offer.remaining_reward_capacity) || offer.remaining_reward_capacity < 0))
+        || (offer.offer_id != null && typeof offer.offer_id !== 'string')) {
+        throw new Error('邀请资格响应不完整，活动和剩余次数未确认，请重试或在官方 Desktop 查看。');
+    }
+    return offer;
 }
 
 export type ReferralProgram = 'codex_referral_consumer' | 'codex_referral_workspace';
@@ -62,11 +75,12 @@ export function hasKnownReferralReward(offer: { grants?: ReferralGrant[] } | nul
 
 /** 当前请求最多可发送的邮箱数量；不等同于奖励名额。 */
 export function referralSendCapacity(offer: ReferralOffer | null): number {
-    if (!offer?.should_show) return 0;
+    if (offer?.should_show !== true) return 0;
     let capacity = Math.min(5, offer.remaining_send_capacity ?? 0);
-    // 奖励名额明确为 0 时，禁止把“还能提交邀请”误解成“还能获得奖励”。
-    if (typeof offer.remaining_reward_capacity === 'number') {
-        capacity = Math.min(capacity, Math.max(0, offer.remaining_reward_capacity));
+    const grants = (offer.grants ?? []).length > 0;
+    const legacyOffer = !!offer.offer_id && offer.offer_id !== 'none';
+    if (grants || legacyOffer) {
+        capacity = Math.min(capacity, Math.max(0, offer.remaining_reward_capacity ?? 0));
     }
     return Math.max(0, capacity);
 }

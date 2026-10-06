@@ -4,6 +4,22 @@ import { createTranslator } from './translator';
 // Earlier UI translations adapted from InventiveSpark/codex-switcher (MIT).
 // Additional translations cover the current UI and preserve source placeholders.
 export const englishReplacements: readonly (readonly [string, string])[] = [
+  ['在浏览器会话中查询', 'Query through browser session'],
+  ['浏览器已确认资格和次数；发送邀请请在官方 Desktop 完成。', 'Browser eligibility and count verified; send invitations in official Desktop.'],
+  ['剩余邀请次数', 'Invitations remaining'],
+  ['上次成功查询：剩余邀请次数', 'Last successful query: invitations remaining'],
+  ['。数据已过期，请以官方 Desktop 为准。', '. Data is stale; check official Desktop.'],
+  ['单次最多', 'Maximum per submission'],
+  ['邀请资格未确认', 'Invitation eligibility unconfirmed'],
+  ['邀请资格未确认，不能据此判断没有活动。', 'Invitation eligibility is unconfirmed; this does not mean no campaign is available.'],
+  ['在官方 Desktop 查看', 'View in official Desktop'],
+  ['当前没有奖励名额，仍可发送无奖励邀请。', 'No reward slots remain, but rewardless invitations are still available.'],
+  ['当前活动没有可发送名额。', 'No sending slots are available for this campaign.'],
+  ['上次成功查询：可发送', 'Last successful query: invitations available for'],
+  ['人。数据已过期，请以官方 Desktop 为准。', 'people. Data is stale; check the official Desktop client.'],
+  ['接口明确返回：当前账号未开放此邀请活动。', 'The API explicitly returned that this campaign is unavailable for this account.'],
+  ['邀请资格响应不完整，活动和剩余次数未确认，请重试或在官方 Desktop 查看。', 'Incomplete eligibility response. Campaign and remaining invitations are unconfirmed; retry or check official Desktop.'],
+  ['邀请查询被网页防护拦截，资格和剩余次数未确认；这不代表没有活动。可在官方 ChatGPT Desktop 查看并邀请。{uncertain}', 'The invitation query was blocked by site protection. Eligibility and remaining invitations are unconfirmed, not unavailable. View and invite in official ChatGPT Desktop.{uncertain}'],
   ['手机锚发送检查', 'Phone anchor send check'],
   ['代理出口有额度，不代表手机锚的工作区允许 Desktop 发送。迁移前会重新检查目标账号。', 'Proxy quota does not mean the anchor workspace allows Desktop to send. The target account is checked again before migration.'],
   ['正在检查…', 'Checking…'],

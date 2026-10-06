@@ -21,6 +21,7 @@ mod provider_quirks;
 mod proxy;
 mod quota_snapshot;
 mod referrals;
+mod referral_browser;
 mod refresh_lock;
 pub mod relay_catalog;
 pub mod relay_translate;
@@ -6402,6 +6403,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if referral_browser::isolated_window(window.label()) { return; }
             // 拦截关闭事件，改为隐藏窗口并从 Dock 隐藏
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
@@ -6415,7 +6417,8 @@ pub fn run() {
                 api.prevent_close();
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let commands: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
             get_accounts,
             i18n::set_app_locale,
             i18n::get_system_locale,
@@ -6441,6 +6444,8 @@ pub fn run() {
             get_quota_by_id,
             send_codex_invite,
             get_desktop_referral_eligibility,
+            referral_browser::get_desktop_referral_eligibility_browser,
+            referrals::open_official_referral_client,
             get_desktop_referral_tracking,
             send_desktop_referral_invite,
             send_codex_wakeup,
@@ -6519,7 +6524,16 @@ pub fn run() {
             remote_refresh_account_quota,
             remote_sync_skills,
             remote_restart_server,
-        ])
+            ];
+            move |invoke: tauri::ipc::Invoke| {
+                if referral_browser::isolated_window(invoke.message.webview().label()) {
+                    invoke.resolver.reject("Official referral browser cannot invoke application commands.");
+                    true
+                } else {
+                    commands(invoke)
+                }
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {

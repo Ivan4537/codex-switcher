@@ -6,6 +6,7 @@ import {
     referralProgramLabel,
     referralRewardCapacity,
     referralSendCapacity,
+    parseReferralOffer,
     type ReferralOffer,
     type ReferralProgram,
 } from './referral';
@@ -16,20 +17,21 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const generation = useRef(0);
+    const [offerKey, setOfferKey] = useState('');
+    const key = accountId + ':' + program;
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (browser = false) => {
         const generationId = ++generation.current;
         setLoading(true);
         setError('');
         try {
-            const data = await invoke<ReferralOffer>('get_desktop_referral_eligibility', {
+            const data = await invoke<ReferralOffer>(browser ? 'get_desktop_referral_eligibility_browser' : 'get_desktop_referral_eligibility', {
                 id: accountId,
                 program,
             });
-            if (generationId === generation.current) setOffer(data);
+            if (generationId === generation.current) { setOffer(parseReferralOffer(data)); setOfferKey(accountId + ':' + program); }
         } catch (err) {
             if (generationId === generation.current) {
-                setOffer(null);
                 setError(String(err));
             }
         } finally {
@@ -42,10 +44,11 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
         return () => { generation.current++; };
     }, [refresh]);
 
-    const capacity = referralSendCapacity(offer);
-    const rewardCapacity = referralRewardCapacity(offer);
-    const knownReward = hasKnownReferralReward(offer);
-    const showOffer = offer?.should_show === true;
+    const currentOffer = offerKey === key ? offer : null;
+    const capacity = referralSendCapacity(currentOffer);
+    const rewardCapacity = referralRewardCapacity(currentOffer);
+    const knownReward = hasKnownReferralReward(currentOffer);
+    const showOffer = currentOffer?.should_show === true;
 
     return (
         <section className="referral-quota-card" aria-label="邀请额度">
@@ -62,41 +65,48 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
                 >
                     {loading ? '查询中…' : '刷新'}
                 </button>
+                <button className="referral-quota-refresh" disabled={loading} onClick={() => void refresh(true)}>在浏览器会话中查询</button>
             </div>
 
-            {loading && !offer && <p className="referral-quota-muted" role="status">正在查询邀请资格…</p>}
+            {loading && <p className="referral-quota-muted" role="status">正在查询邀请资格…</p>}
             {error && (
                 <div className="referral-quota-error" role="alert">
+                    <strong>邀请资格未确认</strong>
                     <span>{error}</span>
                     <button className="referral-quota-retry" onClick={() => void refresh()}>重试</button>
+                    <button className="referral-quota-retry" onClick={() => void invoke('open_official_referral_client').catch(err => setError(String(err)))}>在官方 Desktop 查看</button>
                 </div>
             )}
-            {offer && !error && (
+            {currentOffer && showOffer && error && <p className="referral-quota-muted">上次成功查询：剩余邀请次数 {currentOffer.remaining_send_capacity}。数据已过期，请以官方 Desktop 为准。</p>}
+            {currentOffer && !error && !loading && (
                 showOffer ? (
                     <>
                         <div className="referral-quota-stats">
                             <div>
                                 <span className="referral-quota-label">每位奖励</span>
-                                <strong>{formatReferralReward(offer)}</strong>
+                                <strong>{formatReferralReward(currentOffer)}</strong>
                             </div>
                             <div className="referral-quota-remaining">
-                                <span className="referral-quota-label">可发送邮箱</span>
-                                <strong>{capacity} 人</strong>
+                                <span className="referral-quota-label">剩余邀请次数</span>
+                                <strong>{currentOffer.remaining_send_capacity}</strong>
                             </div>
                         </div>
                         <div className="referral-quota-breakdown">
-                            <span>发送上限 {offer.remaining_send_capacity ?? '未提供'}</span>
-                            <span>奖励名额 {offer.remaining_reward_capacity ?? '未提供'}</span>
+                            <span>发送上限 {currentOffer.remaining_send_capacity ?? '未提供'}</span>
+                            <span>奖励名额 {currentOffer.remaining_reward_capacity ?? '未提供'}</span>
+                            <span>单次最多 {capacity} 人</span>
                         </div>
                         <p className="referral-quota-note">
+                            {currentOffer.query_source === 'verified_browser' && '浏览器已确认资格和次数；发送邀请请在官方 Desktop 完成。'}
                             {!knownReward
                                 ? '接口未提供实际奖励金额，不能根据活动编号推断奖励数额。'
                                 : '活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。'}
-                            {rewardCapacity === 0 && ' 当前奖励名额为 0，已禁止发送邀请。'}
+                            {rewardCapacity === 0 && (capacity > 0 ? ' 当前没有奖励名额，仍可发送无奖励邀请。' : ' 当前活动没有可发送名额。')}
                         </p>
+                        {currentOffer.query_source === 'verified_browser' && <button className="referral-quota-retry" onClick={() => void invoke('open_official_referral_client').catch(err => setError(String(err)))}>在官方 Desktop 查看</button>}
                     </>
                 ) : (
-                    <p className="referral-quota-muted">当前账号暂未开放此邀请活动。</p>
+                    <p className="referral-quota-muted">接口明确返回：当前账号未开放此邀请活动。</p>
                 )
             )}
         </section>

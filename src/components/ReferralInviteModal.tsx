@@ -6,6 +6,7 @@ import {
     referralProgramLabel,
     referralRewardCapacity,
     referralSendCapacity,
+    parseReferralOffer,
     type ReferralInvite,
     type ReferralOffer,
     type ReferralProgram,
@@ -32,12 +33,12 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
     const generation = useRef(0);
     const sendLock = useRef(false);
 
-    async function refreshOffer() {
+    async function refreshOffer(browser = false) {
         const gen = ++generation.current;
         setLoading(true); setError(''); setOffer(null); setConfirmed(false);
         try {
-            const data = await invoke<ReferralOffer>('get_desktop_referral_eligibility', { id, program });
-            if (gen === generation.current) setOffer(data);
+            const data = await invoke<ReferralOffer>(browser ? 'get_desktop_referral_eligibility_browser' : 'get_desktop_referral_eligibility', { id, program });
+            if (gen === generation.current) setOffer(parseReferralOffer(data));
         } catch (e) { if (gen === generation.current) setError(String(e)); }
         finally { if (gen === generation.current) setLoading(false); }
     }
@@ -64,7 +65,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
     const rewardCapacity = referralRewardCapacity(offer);
     const knownReward = hasKnownReferralReward(offer);
     const valid = emails.length > 0 && emails.length <= cap && emails.every(e => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e));
-    const ready = valid && !!offer && (offer.requires_explicit_confirmation === false || confirmed);
+    const ready = valid && !!offer && offer.query_source !== 'verified_browser' && !loading && !error && (offer.requires_explicit_confirmation === false || confirmed);
     async function send() {
         if (!ready || sendLock.current || submitted) return;
         sendLock.current = true; setSending(true); setSubmitted(true); setError('');
@@ -114,10 +115,13 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <button className="referral-text-button" onClick={() => void refreshOffer()} disabled={loading || sending || trackingLoading}>
                                 {loading ? '查询中…' : '刷新资格'}
                             </button>
+                            <button className="referral-text-button" onClick={() => void refreshOffer(true)} disabled={loading || sending || trackingLoading}>在浏览器会话中查询</button>
                         </div>
                     </div>
 
                     {loading && <p className="referral-muted" role="status">正在查询活动资格…</p>}
+                    {!loading && error && !offer && <div className="referral-validation"><p>邀请资格未确认，不能据此判断没有活动。</p>
+                        <button className="referral-text-button" onClick={() => void invoke('open_official_referral_client').catch(err => setError(String(err)))}>在官方 Desktop 查看</button></div>}
                     {offer && <>
                         <div className={`referral-offer-summary${offer.should_show ? '' : ' unavailable'}`}>
                             <div className="referral-reward-block">
@@ -135,11 +139,13 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <span>奖励名额 {offer.remaining_reward_capacity ?? '未提供'}</span>
                         </div>}
                         <p className="referral-note">
+                            {offer.query_source === 'verified_browser' && '浏览器已确认资格和次数；发送邀请请在官方 Desktop 完成。'}
                             {!knownReward
                                 ? '接口未提供实际奖励金额，不能根据活动编号推断为 500 或 1000。'
                                 : '活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。'}
-                            {rewardCapacity === 0 && ' 当前奖励名额为 0，已禁止发送邀请。'}
+                            {rewardCapacity === 0 && (cap > 0 ? ' 当前没有奖励名额，仍可发送无奖励邀请。' : ' 当前活动没有可发送名额。')}
                         </p>
+                        {offer.query_source === 'verified_browser' && <button className="referral-text-button" onClick={() => void invoke('open_official_referral_client').catch(err => setError(String(err)))}>在官方 Desktop 查看</button>}
                     </>}
                 </section>
 
@@ -150,7 +156,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <h3>填写受邀邮箱</h3>
                         </div>
                         {offer?.should_show && <span className="referral-section-hint">
-                            {rewardCapacity === 0 ? '奖励名额已用完' : `最多发送 ${cap} 个`}
+                            {cap === 0 ? '当前活动没有可发送名额。' : `最多发送 ${cap} 个`}
                         </span>}
                     </div>
                     <textarea

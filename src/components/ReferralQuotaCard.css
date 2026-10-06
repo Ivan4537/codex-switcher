@@ -52,6 +52,16 @@
     cursor: pointer;
 }
 
+.referral-quota-error {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+}
+
+.referral-quota-error > span {
+    flex: 1 1 100%;
+    overflow-wrap: anywhere;
+}
+
 .referral-quota-refresh:disabled {
     cursor: wait;
     opacity: 0.65;
