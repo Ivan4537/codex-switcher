@@ -1,32 +1,107 @@
 import { russianLocale } from './ru';
-import { installUiLocale } from './runtime';
+import { englishLocale } from './en';
+import { installUiLocale, type UiLocale } from './runtime';
 
-const locales = new Map([
-  ['ru', russianLocale],
-]);
-
-export type AppLocaleCode = 'ru' | 'zh-CN';
-
-function requestedLocale(): string {
-  return (navigator.language || 'zh-CN').toLowerCase();
+export interface AppLocaleDefinition {
+  code: string;
+  languagePrefixes: readonly string[];
+  nativeName: string;
+  flag: string;
+  translation?: UiLocale;
+  contributors?: readonly LocaleContributor[];
 }
 
-export function resolveAppLocale(language: string): AppLocaleCode {
+export interface LocaleContributor {
+  name: string;
+  url?: string;
+}
+
+export const SOURCE_LOCALE_CODE = 'zh-CN';
+export const AUTO_LOCALE = 'auto';
+
+export const appLocales: readonly AppLocaleDefinition[] = [
+  {
+    code: SOURCE_LOCALE_CODE,
+    languagePrefixes: ['zh'],
+    nativeName: '中文',
+    flag: '🇨🇳',
+  },
+  {
+    code: 'en',
+    languagePrefixes: ['en'],
+    nativeName: 'English',
+    flag: '🇬🇧',
+    translation: englishLocale,
+    contributors: [{ name: 'InventiveSpark', url: 'https://github.com/InventiveSpark' }],
+  },
+  {
+    code: 'ru',
+    languagePrefixes: ['ru'],
+    nativeName: 'Русский',
+    flag: '🇷🇺',
+    translation: russianLocale,
+    contributors: [
+      { name: 'Ivan4537', url: 'https://github.com/Ivan4537' },
+    ],
+  },
+];
+
+export type AppLocaleCode = string;
+export type LocalePreference = typeof AUTO_LOCALE | AppLocaleCode;
+
+const localePreferenceKey = 'codex-switcher.locale';
+let activeLocaleCode = SOURCE_LOCALE_CODE;
+
+function requestedLocale(): string {
+  return (navigator.language || SOURCE_LOCALE_CODE).toLowerCase();
+}
+
+function findLocale(code: string): AppLocaleDefinition | undefined {
+  return appLocales.find(locale => locale.code.toLowerCase() === code.toLowerCase());
+}
+
+export function resolveAppLocale(
+  language: string,
+  preference: LocalePreference = AUTO_LOCALE,
+): AppLocaleCode {
+  if (preference !== AUTO_LOCALE) {
+    const preferred = findLocale(preference);
+    if (preferred) return preferred.code;
+  }
   const normalized = language.toLowerCase();
-  return [...locales.keys()].some(code => normalized.startsWith(code)) ? 'ru' : 'zh-CN';
+  return appLocales.find(locale => (
+    locale.languagePrefixes.some(prefix => normalized.startsWith(prefix.toLowerCase()))
+  ))?.code ?? SOURCE_LOCALE_CODE;
+}
+
+export function getLocalePreference(): LocalePreference {
+  try {
+    const stored = localStorage.getItem(localePreferenceKey);
+    return stored && (stored === AUTO_LOCALE || findLocale(stored)) ? stored : AUTO_LOCALE;
+  } catch {
+    return AUTO_LOCALE;
+  }
+}
+
+export function setLocalePreference(preference: LocalePreference) {
+  if (preference !== AUTO_LOCALE && !findLocale(preference)) return;
+  localStorage.setItem(localePreferenceKey, preference);
+  window.location.reload();
+}
+
+export function getActiveLocale(): AppLocaleDefinition {
+  return findLocale(activeLocaleCode) ?? appLocales[0];
 }
 
 // Chinese remains the source language and the fallback for unsupported locales.
 export function installAppLocale(systemLocale?: string): AppLocaleCode {
-  const language = systemLocale ?? requestedLocale();
-  const localeCode = resolveAppLocale(language);
-  const locale = localeCode === 'ru' ? russianLocale : undefined;
-  if (locale) {
-    installUiLocale(locale);
-    return localeCode;
+  activeLocaleCode = resolveAppLocale(systemLocale ?? requestedLocale(), getLocalePreference());
+  const locale = getActiveLocale();
+  if (locale.translation) {
+    installUiLocale(locale.translation);
   } else {
-    document.documentElement.lang = 'zh-CN';
+    document.documentElement.lang = locale.code;
     document.title = 'Codex Switcher';
-    return 'zh-CN';
   }
+  return locale.code;
 }

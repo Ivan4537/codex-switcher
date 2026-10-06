@@ -316,7 +316,7 @@ export function Skills() {
                             <div key={skill.id} className="skill-card" onClick={() => handleOpenDetail(skill)} style={{ cursor: 'pointer' }}>
                                 <div className="skill-info">
                                     <div className="skill-name" translate="no">{skill.name}</div>
-                                    <div className="skill-desc" translate="no">{skill.description || '无描述'}</div>
+                                    <div className="skill-desc">{skill.description ? <span translate="no">{skill.description}</span> : '无描述'}</div>
                                     <div className="skill-meta">
                                         {skill.source === 'github' && skill.repo_owner && (
                                             <span className="skill-source" translate="no">{skill.repo_owner}/{skill.repo_name}</span>
@@ -348,7 +348,7 @@ export function Skills() {
                         <div key={skill.key} className="skill-card">
                             <div className="skill-info">
                                 <div className="skill-name" translate="no">{skill.name}</div>
-                                <div className="skill-desc" translate="no">{skill.description || '无描述'}</div>
+                                <div className="skill-desc">{skill.description ? <span translate="no">{skill.description}</span> : '无描述'}</div>
                                 <div className="skill-meta">
                                     <span className="skill-source" translate="no">{skill.repo_owner}/{skill.repo_name}</span>
                                 </div>

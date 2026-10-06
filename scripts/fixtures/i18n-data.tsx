@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { installAppLocale } from '../../src/i18n';
+import { LanguagePicker } from '../../src/components/LanguagePicker';
 import '../../src/App.css';
 
 installAppLocale('ru-RU');
@@ -8,6 +9,7 @@ installAppLocale('ru-RU');
 function Fixture() {
     const [name, setName] = useState('生产账号A');
     return <main style={{ padding: 24 }}>
+        <LanguagePicker />
         <h2>账号</h2>
         <p>复制 <span translate="no" title={name} data-testid="account-name">{name}</span></p>
         <p translate="no" data-testid="user-notes">客户备注：测试账号。保持原文。</p>

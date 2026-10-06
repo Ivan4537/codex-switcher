@@ -78,7 +78,7 @@ export function Dashboard({
             {/* 问候语 */}
             <div className="dashboard-greeting">
                 <h2>
-                    你好, <span translate="no">{currentAccount?.name.split('@')[0] || '用户'}</span> 👋
+                    你好, {currentAccount ? <span translate="no">{currentAccount.name.split('@')[0]}</span> : '用户'} 👋
                 </h2>
             </div>
 

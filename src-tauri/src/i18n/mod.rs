@@ -1,14 +1,16 @@
+mod en;
 mod ru;
 #[allow(dead_code)]
 mod zh_cn;
 
+use en::EnglishLocale;
 use ru::RussianLocale;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::RwLock;
 use zh_cn::ChineseLocale;
 
 pub const APP_NAME: &str = "Codex Switcher";
 
-trait BackendLocale {
+trait BackendLocale: Sync {
     fn oauth_success_html(&self) -> &'static str;
     fn oauth_failure_response(&self) -> &'static str;
     fn tray_tooltip_logged_out(&self) -> String;
@@ -32,34 +34,65 @@ trait BackendLocale {
 
 const RUSSIAN_LOCALE: RussianLocale = RussianLocale;
 const CHINESE_LOCALE: ChineseLocale = ChineseLocale;
-const LOCALE_AUTO: u8 = 0;
-const LOCALE_ZH_CN: u8 = 1;
-const LOCALE_RU: u8 = 2;
-static ACTIVE_LOCALE: AtomicU8 = AtomicU8::new(LOCALE_AUTO);
+const ENGLISH_LOCALE: EnglishLocale = EnglishLocale;
+
+struct BackendLocaleDefinition {
+    code: &'static str,
+    language_prefixes: &'static [&'static str],
+    locale: &'static dyn BackendLocale,
+}
+
+static BACKEND_LOCALES: &[BackendLocaleDefinition] = &[
+    BackendLocaleDefinition {
+        code: "en",
+        language_prefixes: &["en"],
+        locale: &ENGLISH_LOCALE,
+    },
+    BackendLocaleDefinition {
+        code: "zh-CN",
+        language_prefixes: &["zh"],
+        locale: &CHINESE_LOCALE,
+    },
+    BackendLocaleDefinition {
+        code: "ru",
+        language_prefixes: &["ru"],
+        locale: &RUSSIAN_LOCALE,
+    },
+];
+
+static ACTIVE_LOCALE: RwLock<Option<&'static dyn BackendLocale>> = RwLock::new(None);
+
+fn locale_by_code(code: &str) -> Option<&'static dyn BackendLocale> {
+    BACKEND_LOCALES
+        .iter()
+        .find(|entry| entry.code.eq_ignore_ascii_case(code))
+        .map(|entry| entry.locale)
+}
 
 fn active_locale() -> &'static dyn BackendLocale {
-    match ACTIVE_LOCALE.load(Ordering::Relaxed) {
-        LOCALE_RU => &RUSSIAN_LOCALE,
-        LOCALE_ZH_CN => &CHINESE_LOCALE,
-        _ => {
-            let language = std::env::var("LANG").unwrap_or_default().to_lowercase();
-            if language.starts_with("ru") {
-                &RUSSIAN_LOCALE
-            } else {
-                &CHINESE_LOCALE
-            }
+    if let Ok(active) = ACTIVE_LOCALE.read() {
+        if let Some(locale) = *active {
+            return locale;
         }
     }
+    let language = std::env::var("LANG").unwrap_or_default().to_lowercase();
+    BACKEND_LOCALES
+        .iter()
+        .find(|entry| {
+            entry
+                .language_prefixes
+                .iter()
+                .any(|prefix| language.starts_with(prefix))
+        })
+        .map(|entry| entry.locale)
+        .unwrap_or(&CHINESE_LOCALE)
 }
 
 #[tauri::command]
 pub fn set_app_locale(app: tauri::AppHandle, locale: String) -> Result<(), String> {
-    let value = match locale.as_str() {
-        "ru" => LOCALE_RU,
-        "zh-CN" => LOCALE_ZH_CN,
-        _ => return Err(format!("Unsupported application locale: {locale}")),
-    };
-    ACTIVE_LOCALE.store(value, Ordering::Relaxed);
+    let selected = locale_by_code(&locale)
+        .ok_or_else(|| format!("Unsupported application locale: {locale}"))?;
+    *ACTIVE_LOCALE.write().map_err(|error| error.to_string())? = Some(selected);
     crate::tray::update_tray_native_menu(&app).map_err(|error| error.to_string())?;
     crate::tray::update_tray_menu(&app);
     Ok(())
@@ -191,4 +224,23 @@ pub fn referral_missing_items() -> &'static str {
 
 pub fn referral_no_available_campaign() -> &'static str {
     active_locale().referral_no_available_campaign()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::locale_by_code;
+
+    #[test]
+    fn english_native_ui_preserves_account_identity() {
+        let locale = locale_by_code("en").unwrap();
+        assert_eq!(locale.tray_show_main(), "Open main window");
+        assert!(locale.oauth_success_html().contains("lang=\"en\""));
+        assert!(locale
+            .tray_tooltip_account("生产账号A", 73.0, 42.0)
+            .contains("生产账号A"));
+        assert!(locale
+            .injected_switch_message("生产账号A")
+            .contains("生产账号A"));
+        assert!(locale_by_code("de").is_none());
+    }
 }
