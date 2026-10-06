@@ -37,6 +37,23 @@ fn generate_state() -> String {
 
 /// 官方固定端口
 const DEFAULT_PORT: u16 = 1455;
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
+
+fn clear_pending_login(expected_state: Option<&str>) {
+    if let Ok(mut pending) = get_pending_login().lock() {
+        let should_clear = expected_state
+            .is_none_or(|state| pending.as_ref().is_some_and(|login| login.state == state));
+        if should_clear {
+            pending.take();
+        }
+    }
+}
+
+fn notify_login_failed(app_handle: &AppHandle, message: &str) {
+    if let Err(error) = app_handle.emit("oauth-login-failed", message) {
+        eprintln!("[OAuth] 发送登录失败事件失败: {}", error);
+    }
+}
 
 /// 准备 OAuth 流程并返回授权 URL
 ///
@@ -115,11 +132,13 @@ pub async fn start_oauth_login(
 
 /// 监听回调
 async fn handle_callback(listener: TcpListener, app_handle: AppHandle, expected_state: String) {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + CALLBACK_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             eprintln!("[OAuth] 回调监听超时，未收到有效授权码");
+            clear_pending_login(Some(&expected_state));
+            notify_login_failed(&app_handle, "OpenAI 授权已超时，请重新发起登录。");
             return;
         }
 
@@ -127,6 +146,8 @@ async fn handle_callback(listener: TcpListener, app_handle: AppHandle, expected_
             Ok(result) => result,
             Err(_) => {
                 eprintln!("[OAuth] 回调监听超时，未收到有效授权码");
+                clear_pending_login(Some(&expected_state));
+                notify_login_failed(&app_handle, "OpenAI 授权已超时，请重新发起登录。");
                 return;
             }
         };
@@ -168,6 +189,20 @@ async fn handle_callback(listener: TcpListener, app_handle: AppHandle, expected_
         let response = "HTTP/1.1 400 Bad Request\r\n\r\n授权失败: State 校验不通过或参数缺失";
         let _ = socket.write_all(response.as_bytes()).await;
     }
+}
+
+/// 取消仍在等待浏览器回调的 OAuth 流程，并立即释放固定监听端口。
+#[tauri::command]
+pub async fn cancel_oauth_login() -> Result<(), String> {
+    let task = get_callback_task()
+        .lock()
+        .map_err(|_| "OAuth 回调任务锁异常")?
+        .take();
+    if let Some(task) = task {
+        task.abort();
+    }
+    clear_pending_login(None);
+    Ok(())
 }
 
 fn extract_oauth_code_from_request(request: &str, expected_state: &str) -> Option<String> {

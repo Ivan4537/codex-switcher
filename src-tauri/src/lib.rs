@@ -6430,6 +6430,7 @@ pub fn run() {
             list_reset_credits,
             open_codex_terminal,
             oauth_server::start_oauth_login,
+            oauth_server::cancel_oauth_login,
             oauth_server::submit_oauth_callback,
             oauth_server::copy_to_clipboard,
             antigravity::flow::start_antigravity_oauth_login,
