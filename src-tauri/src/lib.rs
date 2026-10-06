@@ -3,6 +3,7 @@
 //! 暴露所有 Tauri 命令供前端调用
 
 pub mod account;
+mod anchor_recovery;
 mod antigravity;
 mod bulk_import;
 pub mod chat_inbound;
@@ -1529,6 +1530,7 @@ async fn switch_account(
                 let mut store = state.store.lock().map_err(|e| e.to_string())?;
                 if let Some(account) = store.accounts.get_mut(&target_id) {
                     account.cached_quota = Some(account::CachedQuota {
+                        desktop_gate: usage.desktop_gate.clone(),
                         five_hour_left: usage.five_hour_left as f64,
                         five_hour_reset: usage.five_hour_reset.clone(),
                         five_hour_reset_at: usage.five_hour_reset_at,
@@ -2227,6 +2229,7 @@ fn window_prime_due(account: &Account, now_ts: i64) -> WindowPrimeDue {
 
 fn cached_quota_from_usage(usage: &usage::UsageDisplay) -> account::CachedQuota {
     account::CachedQuota {
+        desktop_gate: usage.desktop_gate.clone(),
         five_hour_left: usage.five_hour_left as f64,
         five_hour_reset: usage.five_hour_reset.clone(),
         five_hour_reset_at: usage.five_hour_reset_at,
@@ -2772,7 +2775,11 @@ pub fn start_quota_refresh(
                             updated_at: updated,
                             window_expired: expired,
                             plus_watch,
-                            prime_due: window_prime_due(a, now_ts),
+                            prime_due: if s.settings.protect_session_anchor && a.is_session_anchor {
+                                WindowPrimeDue::default()
+                            } else {
+                                window_prime_due(a, now_ts)
+                            },
                         }
                     })
                     .collect();
@@ -3156,10 +3163,13 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
 
     for account in store.accounts.values() {
         if account.id == current_id
+            || (store.settings.protect_session_anchor && account.is_session_anchor)
             || account.is_banned
             || account.is_token_invalid
             || account.is_logged_out
             || account.is_antigravity_oauth()
+            || account.cached_quota.as_ref().and_then(|quota| quota.desktop_gate.as_ref())
+                .is_some_and(usage::DesktopUsageGate::workspace_blocked)
         {
             continue;
         }
@@ -3258,6 +3268,7 @@ pub(crate) fn subscription_candidate_before_credits(
     let eligible = |id: &str| {
         store.accounts.get(id).is_some_and(|a| {
             id != account_id
+                && !(store.settings.protect_session_anchor && a.is_session_anchor)
                 && a.is_openai_account()
                 && !a.is_banned && !a.is_token_invalid && !a.is_logged_out
                 && AccountStore::extract_access_token(&a.auth_json).is_some()
@@ -3518,6 +3529,7 @@ async fn get_quota_internal(state: &AppState, id: String) -> Result<UsageDisplay
 
 fn usage_to_cached(u: &UsageDisplay) -> crate::account::CachedQuota {
     crate::account::CachedQuota {
+        desktop_gate: u.desktop_gate.clone(),
         five_hour_left: u.five_hour_left as f64,
         five_hour_reset: u.five_hour_reset.clone(),
         five_hour_reset_at: u.five_hour_reset_at,
@@ -4120,6 +4132,7 @@ async fn get_quota_by_id(
 
             // 更新配额缓存
             account.cached_quota = Some(account::CachedQuota {
+                desktop_gate: usage.desktop_gate.clone(),
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
                 five_hour_reset_at: usage.five_hour_reset_at,
@@ -4150,6 +4163,7 @@ async fn get_quota_by_id(
         let mut store = state.store.lock().map_err(|e| e.to_string())?;
         if let Some(account) = store.accounts.get_mut(&id) {
             account.cached_quota = Some(account::CachedQuota {
+                desktop_gate: usage.desktop_gate.clone(),
                 five_hour_left: usage.five_hour_left as f64,
                 five_hour_reset: usage.five_hour_reset.clone(),
                 five_hour_reset_at: usage.five_hour_reset_at,
@@ -6415,6 +6429,7 @@ pub fn run() {
             update_relay_usage_cookie,
             set_account_inactive_refresh_enabled,
             set_session_anchor,
+            anchor_recovery::recover_session_anchor,
             export_accounts,
             import_accounts,
             add_relay_account,
@@ -6592,6 +6607,7 @@ mod tests {
         account.window_priming.five_hour_enabled = true;
         account.window_priming.weekly_enabled = true;
         account.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 0.0,
             five_hour_reset: String::new(),
             five_hour_reset_at: Some(now.timestamp() - 30),
@@ -6626,6 +6642,7 @@ mod tests {
         let now = Utc::now();
         let mut account = test_account("prime", "workspace-1", "rt-1");
         account.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 100.0,
             five_hour_reset: String::new(),
             five_hour_reset_at: Some(now.timestamp() + 60),
@@ -6729,6 +6746,7 @@ mod tests {
         account.kind = account::AccountKind::ChatgptOauth;
         account.window_priming.weekly_enabled = true;
         account.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 100.0,
             five_hour_reset: "6天后重置".to_string(),
             five_hour_reset_at: Some(reset_at),
@@ -6770,6 +6788,7 @@ mod tests {
         team.id = "team".to_string();
         team.kind = account::AccountKind::ChatgptOauth;
         team.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 100.0,
             five_hour_reset: "6天23小时59分钟后重置".to_string(),
             five_hour_reset_at: Some(now.timestamp() + 7 * 24 * 3600),
@@ -6794,6 +6813,7 @@ mod tests {
         plus.id = "plus".to_string();
         plus.kind = account::AccountKind::ChatgptOauth;
         plus.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 100.0,
             five_hour_reset: "4小时59分钟后重置".to_string(),
             five_hour_reset_at: Some(now.timestamp() + 5 * 3600),
@@ -6902,6 +6922,23 @@ mod tests {
     }
 
     #[test]
+    fn protected_anchor_is_excluded_and_can_be_opted_in() {
+        let mut store = AccountStore::default();
+        let mut anchor = test_account("anchor", "anchor", "rt-anchor");
+        anchor.id = "anchor".into();
+        anchor.kind = account::AccountKind::ChatgptOauth;
+        anchor.is_session_anchor = true;
+        store.accounts.insert(anchor.id.clone(), anchor);
+        let mut worker = test_account("worker", "worker", "rt-worker");
+        worker.id = "worker".into();
+        store.accounts.insert(worker.id.clone(), worker);
+        assert!(store.settings.protect_session_anchor);
+        assert_eq!(score_candidate_accounts(&store).iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["worker"]);
+        store.settings.protect_session_anchor = false;
+        assert_eq!(score_candidate_accounts(&store).len(), 2);
+    }
+
+    #[test]
     fn quarantine_fix_ticket_can_only_be_used_once() {
         let state = AppState::new();
         let ticket = state.issue_quarantine_fix_ticket().unwrap();
@@ -6941,6 +6978,7 @@ mod tests {
         let mut store = AccountStore::default();
         store.current = Some("current".to_string());
         let quota = |plan_type: &str| account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 100.0,
             five_hour_reset: "".to_string(),
             five_hour_reset_at: Some(now.timestamp() + 3600),
@@ -6987,6 +7025,7 @@ mod tests {
         let mut credit_only = test_account("credits", "credits-account", "rt-credits");
         credit_only.id = "credits".to_string();
         credit_only.cached_quota = Some(account::CachedQuota {
+            desktop_gate: None,
             five_hour_left: 0.0,
             five_hour_reset: "".to_string(),
             five_hour_reset_at: Some(now.timestamp() + 3600),

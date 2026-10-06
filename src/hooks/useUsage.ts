@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { Account, LunaReserveWindow, RelayUsageCache } from './useAccounts';
 
 export interface UsageDisplay {
+    desktop_gate?: { allowed: boolean | null; limit_reached: boolean | null; spend_limit_reached?: boolean | null; reason: string | null } | null;
     plan_type: string;
     five_hour_used: number;
     five_hour_left: number;

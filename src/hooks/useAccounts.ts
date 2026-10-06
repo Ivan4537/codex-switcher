@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 export interface CachedQuota {
+    desktop_gate?: { allowed: boolean | null; limit_reached: boolean | null; spend_limit_reached?: boolean | null; reason: string | null } | null;
     five_hour_left: number;
     five_hour_reset: string;
     five_hour_reset_at?: number;
@@ -43,6 +44,7 @@ export interface LunaReserveWindow {
 }
 
 export interface AppSettings {
+    protect_session_anchor?: boolean;
     auto_reload_ide: boolean;
     primary_ide: string;
     use_pkill_restart: boolean;

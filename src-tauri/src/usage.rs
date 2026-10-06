@@ -61,7 +61,35 @@ impl LunaReserveWindow {
 
 /// 前端展示的用量数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopUsageGate {
+    pub allowed: Option<bool>,
+    pub limit_reached: Option<bool>,
+    pub spend_limit_reached: Option<bool>,
+    pub reason: Option<String>,
+}
+
+impl DesktopUsageGate {
+    pub fn workspace_blocked(&self) -> bool {
+        self.spend_limit_reached == Some(true)
+            || self.reason.as_deref().is_some_and(|reason| {
+                reason.starts_with("workspace_")
+                    && (reason.ends_with("credits_depleted")
+                        || reason.ends_with("usage_limit_reached"))
+            })
+    }
+
+    pub fn confirmed_available(&self) -> bool {
+        self.allowed == Some(true)
+            && self.limit_reached != Some(true)
+            && self.spend_limit_reached != Some(true)
+            && self.reason.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageDisplay {
+    #[serde(default)]
+    pub desktop_gate: Option<DesktopUsageGate>,
     /// 套餐类型
     pub plan_type: String,
     /// 5小时窗口使用百分比
@@ -113,6 +141,13 @@ impl UsageDisplay {
 
     /// 套餐窗口仍可用；free/unknown 没有可靠周窗口时只看主窗口。
     pub fn has_rate_limit_quota(&self) -> bool {
+        if self
+            .desktop_gate
+            .as_ref()
+            .is_some_and(DesktopUsageGate::workspace_blocked)
+        {
+            return false;
+        }
         let plan = self.plan_type.to_lowercase();
         let is_free = plan == "free" || plan == "unknown";
         if is_free {
@@ -123,6 +158,13 @@ impl UsageDisplay {
     }
 
     pub fn has_usable_quota(&self) -> bool {
+        if self
+            .desktop_gate
+            .as_ref()
+            .is_some_and(DesktopUsageGate::workspace_blocked)
+        {
+            return false;
+        }
         self.has_rate_limit_quota() || self.has_spendable_credits()
     }
 }
@@ -395,6 +437,32 @@ impl UsageFetcher {
             .to_string();
 
         let rate_limit = json.get("rate_limit");
+        let reason = json
+            .get("rate_limit_reached_type")
+            .filter(|value| !value.is_null())
+            .or_else(|| rate_limit.and_then(|r| r.get("rate_limit_reached_type")))
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("type").and_then(Value::as_str))
+            })
+            .map(str::to_string);
+        let spend_limit_reached = json
+            .pointer("/spend_control/reached")
+            .and_then(Value::as_bool);
+        let desktop_gate = (rate_limit.is_some_and(Value::is_object)
+            || reason.is_some()
+            || spend_limit_reached.is_some())
+        .then(|| DesktopUsageGate {
+            allowed: rate_limit
+                .and_then(|value| value.get("allowed"))
+                .and_then(Value::as_bool),
+            limit_reached: rate_limit
+                .and_then(|value| value.get("limit_reached"))
+                .and_then(Value::as_bool),
+            spend_limit_reached,
+            reason,
+        });
 
         // 解析 5 小时窗口 (Primary)
         let primary_val = rate_limit.and_then(|r| r.get("primary_window"));
@@ -492,6 +560,7 @@ impl UsageFetcher {
             });
 
         Ok(UsageDisplay {
+            desktop_gate,
             plan_type,
             five_hour_used: p_used,
             five_hour_left: 100 - p_used,
@@ -2161,6 +2230,52 @@ mod tests {
         usage.credits_balance = Some(0.0);
         assert!(!usage.has_spendable_credits());
         assert!(!usage.has_usable_quota());
+    }
+
+    #[test]
+    fn workspace_hard_stop_overrides_positive_windows_and_credits() {
+        for reason in [
+            serde_json::json!("workspace_owner_credits_depleted"),
+            serde_json::json!({"type":"workspace_member_usage_limit_reached"}),
+        ] {
+            let body = serde_json::json!({"plan_type":"business", "rate_limit_reached_type":reason,
+                "rate_limit":{"allowed":false,"limit_reached":true,
+                    "primary_window":{"used_percent":0},"secondary_window":{"used_percent":0}},
+                "credits":{"has_credits":true,"balance":100}});
+            let usage = UsageFetcher::parse_usage_response(&body).unwrap();
+            assert!(usage.desktop_gate.as_ref().unwrap().workspace_blocked());
+            assert!(!usage.has_usable_quota());
+            let cached = crate::cached_quota_from_usage(&usage);
+            assert!(!cached.has_usable_quota());
+        }
+    }
+
+    #[test]
+    fn desktop_gate_requires_explicit_availability() {
+        let known = UsageFetcher::parse_usage_response(&serde_json::json!({"plan_type":"plus",
+            "rate_limit":{"allowed":true,"limit_reached":false}}))
+        .unwrap();
+        assert!(known.desktop_gate.unwrap().confirmed_available());
+        let unknown = UsageFetcher::parse_usage_response(&serde_json::json!({"plan_type":"plus",
+            "rate_limit":{"primary_window":{"used_percent":0}}}))
+        .unwrap();
+        assert!(!unknown.desktop_gate.unwrap().confirmed_available());
+    }
+
+    #[test]
+    fn spend_control_and_nested_reason_are_preserved() {
+        let blocked =
+            UsageFetcher::parse_usage_response(&serde_json::json!({"plan_type":"business",
+            "rate_limit":{"allowed":true,"limit_reached":false},"spend_control":{"reached":true}}))
+            .unwrap();
+        assert!(blocked.desktop_gate.as_ref().unwrap().workspace_blocked());
+        assert!(!blocked.desktop_gate.unwrap().confirmed_available());
+        let nested =
+            UsageFetcher::parse_usage_response(&serde_json::json!({"plan_type":"business",
+            "rate_limit_reached_type":null,"rate_limit":{"allowed":false,"limit_reached":true,
+                "rate_limit_reached_type":"workspace_owner_credits_depleted"}}))
+            .unwrap();
+        assert!(nested.desktop_gate.unwrap().workspace_blocked());
     }
 
     #[test]

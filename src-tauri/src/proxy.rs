@@ -693,7 +693,8 @@ async fn resolve_token_with_affinity(
                 .get(id)
                 .map(|a| {
                     // 基础健康：没被打三个 flag
-                    let basic_ok = !a.is_banned && !a.is_logged_out && !a.is_token_invalid;
+                    let basic_ok = !a.is_banned && !a.is_logged_out && !a.is_token_invalid
+                        && !(store.settings.protect_session_anchor && a.is_session_anchor);
                     if !basic_ok {
                         return false;
                     }
@@ -6563,6 +6564,7 @@ async fn handle_websocket(
                                     if let Ok(mut store) = state.store.lock() {
                                         if let Some(acc) = store.accounts.get_mut(&id) {
                                             acc.cached_quota = Some(crate::account::CachedQuota {
+                                                desktop_gate: usage.desktop_gate.clone(),
                                                 five_hour_left: usage.five_hour_left as f64,
                                                 five_hour_reset: usage.five_hour_reset.clone(),
                                                 five_hour_reset_at: usage.five_hour_reset_at,

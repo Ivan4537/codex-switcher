@@ -76,6 +76,9 @@ pub struct AppSettings {
     /// 热切 = 只改 store.current + 失效代理缓存，不写 ~/.codex/auth.json
     #[serde(default = "default_switch_mode")]
     pub switch_mode: String,
+    /// Keep the phone anchor out of automatic account selection and soft affinity.
+    #[serde(default = "default_true")]
+    pub protect_session_anchor: bool,
 
     /// 切号时注入消息到 Codex 对话（实验性）
     #[serde(default)]
@@ -276,6 +279,7 @@ impl Default for AppSettings {
             notify_on_switch: false,
             inject_switch_message: false,
             switch_mode: default_switch_mode(),
+            protect_session_anchor: true,
             quota_refresh_enabled: false,
             quota_refresh_interval: default_quota_refresh_interval(),
             quota_refresh_batch: default_quota_refresh_batch(),
@@ -629,6 +633,8 @@ pub struct RelayQuotaWindow {
 /// 缓存的配额信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedQuota {
+    #[serde(default)]
+    pub desktop_gate: Option<crate::usage::DesktopUsageGate>,
     pub five_hour_left: f64,
     pub five_hour_reset: String,
     pub five_hour_reset_at: Option<i64>,
@@ -683,6 +689,13 @@ impl CachedQuota {
 
     /// 套餐窗口仍可用；free/unknown 没有可靠周窗口时只看主窗口。
     pub fn has_rate_limit_quota(&self) -> bool {
+        if self
+            .desktop_gate
+            .as_ref()
+            .is_some_and(crate::usage::DesktopUsageGate::workspace_blocked)
+        {
+            return false;
+        }
         let plan = self.plan_type.to_lowercase();
         let is_free = plan == "free" || plan == "unknown";
         if is_free {
@@ -693,6 +706,13 @@ impl CachedQuota {
     }
 
     pub fn has_usable_quota(&self) -> bool {
+        if self
+            .desktop_gate
+            .as_ref()
+            .is_some_and(crate::usage::DesktopUsageGate::workspace_blocked)
+        {
+            return false;
+        }
         self.has_rate_limit_quota() || self.has_spendable_credits()
     }
 }

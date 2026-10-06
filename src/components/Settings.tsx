@@ -6,8 +6,10 @@ import { formatPlanLabel } from '../utils/planLabel';
 import './Settings.css';
 import { isMacOS } from '../platform';
 import { appLocales, getActiveLocale, SOURCE_LOCALE_CODE } from '../i18n';
+import { AnchorRecoveryPanel } from './AnchorRecoveryPanel';
 
 interface AppSettings {
+    protect_session_anchor: boolean;
     auto_reload_ide: boolean;
     primary_ide: string;
     use_pkill_restart: boolean;
@@ -56,6 +58,7 @@ interface SettingsProps {
 
 export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = {}) {
     const [settings, setSettings] = useState<AppSettings>({
+        protect_session_anchor: true,
         auto_reload_ide: false,
         primary_ide: 'Windsurf',
         use_pkill_restart: false,
@@ -725,6 +728,14 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                     <h3><Smartphone size={16} /> Codex.app 手机锚绑定</h3>
                     <div className="setting-item">
                         <div className="setting-info">
+                            <span className="setting-label">保护手机锚额度</span>
+                            <span className="setting-desc">默认不把手机锚用于自动选号和自动会话绑定。手动选择和明确指定的会话路由仍按你的设置执行。</span>
+                        </div>
+                        <label className="toggle"><input type="checkbox" checked={settings.protect_session_anchor ?? true}
+                            onChange={event => updateField('protect_session_anchor', event.target.checked)} /><span className="toggle-slider" /></label>
+                    </div>
+                    <div className="setting-item">
+                        <div className="setting-info">
                             <span className="setting-label">当前绑定账号</span>
                             <span className="setting-desc">
                                 磁盘 ~/.codex/auth.json 永远跟随此号，Codex.app 手机远程连接绑定此号；
@@ -765,6 +776,8 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                     </div>
                 </div>
             )}
+
+            {onSetSessionAnchor && anchorAccount && <div className="settings-section"><AnchorRecoveryPanel accounts={accounts} /></div>}
 
             <div className="settings-section danger">
                 <h3><Wrench size={16} /> 故障修复</h3>

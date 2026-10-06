@@ -947,6 +947,7 @@ async fn handle_upsert(state: &ApiState, req: Request<Incoming>) -> Response<Res
                 let mutated = if let Ok(mut s) = state.store.lock() {
                     if let Some(acc) = s.accounts.get_mut(&id) {
                         acc.cached_quota = Some(crate::account::CachedQuota {
+                            desktop_gate: usage.desktop_gate.clone(),
                             five_hour_left: usage.five_hour_left as f64,
                             five_hour_reset: usage.five_hour_reset.clone(),
                             five_hour_reset_at: usage.five_hour_reset_at,
@@ -1157,6 +1158,7 @@ async fn handle_refresh_account(state: &ApiState, id: &str) -> Response<Response
             let mutated = if let Ok(mut s) = state.store.lock() {
                 if let Some(acc) = s.accounts.get_mut(&id) {
                     acc.cached_quota = Some(crate::account::CachedQuota {
+                        desktop_gate: usage.desktop_gate.clone(),
                         five_hour_left: usage.five_hour_left as f64,
                         five_hour_reset: usage.five_hour_reset.clone(),
                         five_hour_reset_at: usage.five_hour_reset_at,
