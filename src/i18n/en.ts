@@ -4,6 +4,16 @@ import { createTranslator } from './translator';
 // Earlier UI translations adapted from InventiveSpark/codex-switcher (MIT).
 // Additional translations cover the current UI and preserve source placeholders.
 export const englishReplacements: readonly (readonly [string, string])[] = [
+  ['本次查询未显示邀请入口', 'This query did not show an invitation entrypoint'],
+  ['浏览器已确认', 'Browser verified'],
+  ['入口；发送邀请请在官方 Desktop 完成。', ' entrypoint; send invitations in official Desktop.'],
+  ['浏览器已查询', 'Browser checked'],
+  ['，接口未展示入口；不代表邀请次数为零。', '; the API did not show an entrypoint. This does not mean zero invitations remain.'],
+  ['这里只查询了 persistent 入口，不能据此判断其他官方入口没有活动。请在浏览器会话中补查。', 'Only the persistent entrypoint was checked. Other official entrypoints may differ; check through the browser session.'],
+  ['本次接口返回剩余发送次数：', 'Invitations remaining in this response: '],
+  ['本次查询未显示邀请入口，不代表邀请次数为零。', 'This query did not show an invitation entrypoint; this does not mean zero invitations remain.'],
+  ['已查询', 'Checked'],
+  ['请在浏览器会话中补查官方邀请入口。', 'Check the official invitation entrypoints through the browser session.'],
   ['在浏览器会话中查询', 'Query through browser session'],
   ['浏览器已确认资格和次数；发送邀请请在官方 Desktop 完成。', 'Browser eligibility and count verified; send invitations in official Desktop.'],
   ['剩余邀请次数', 'Invitations remaining'],

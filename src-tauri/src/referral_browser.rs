@@ -54,6 +54,23 @@ fn readback(
             }
         }
         offer["query_source"] = json!("verified_browser");
+        if let Some(entrypoint) = data["query_entrypoint"].as_str() {
+            if !matches!(entrypoint, "persistent" | "rate_limit") {
+                return Err("Unsupported browser referral entrypoint.".into());
+            }
+            offer["query_entrypoint"] = json!(entrypoint);
+        }
+        if let Some(checked) = data["checked_entrypoints"].as_array() {
+            if checked.is_empty()
+                || checked.len() > 2
+                || checked
+                    .iter()
+                    .any(|item| !matches!(item.as_str(), Some("persistent" | "rate_limit")))
+            {
+                return Err("Invalid browser referral query context.".into());
+            }
+            offer["checked_entrypoints"] = json!(checked);
+        }
         Ok(offer)
     })())
 }
@@ -91,11 +108,12 @@ pub async fn get_desktop_referral_eligibility_browser(
         return Err("Selected account changed before browser verification.".into());
     }
     // A successful ordinary usage GET anchors browser results to the selected identity.
+    let user_agent = crate::desktop_ua::user_agent();
     let baseline = crate::usage::usage_client()
         .get("https://chatgpt.com/backend-api/wham/usage")
         .bearer_auth(&token)
         .header("ChatGPT-Account-Id", &account_id)
-        .header("User-Agent", crate::codex_ua::codex_user_agent())
+        .header("User-Agent", &user_agent)
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
@@ -134,6 +152,7 @@ pub async fn get_desktop_referral_eligibility_browser(
         WebviewUrl::External("https://chatgpt.com/".parse().unwrap()),
     )
     .title("只读邀请查询 / Read-only invitation query")
+    .user_agent(&user_agent)
     .inner_size(1050.0, 760.0)
     .initialization_script(script)
     .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
@@ -184,7 +203,7 @@ mod tests {
     #[test]
     fn callback_requires_nonce_and_exact_workspace_and_user() {
         let mut url = url::Url::parse("referral-result://result").unwrap();
-        let payload = json!({"account_id":"A","user_id":"U","offer":{"should_show":true,"remaining_send_capacity":3,"token":"must-not-return"}});
+        let payload = json!({"account_id":"A","user_id":"U","offer":{"should_show":true,"remaining_send_capacity":3,"token":"must-not-return"},"query_entrypoint":"rate_limit","checked_entrypoints":["persistent","rate_limit"]});
         url.query_pairs_mut()
             .append_pair("nonce", "n")
             .append_pair("data", &payload.to_string());
@@ -194,5 +213,10 @@ mod tests {
         let offer = readback(&url, "n", "A", "U").unwrap().unwrap();
         assert!(offer.get("token").is_none());
         assert_eq!(offer["query_source"], "verified_browser");
+        assert_eq!(offer["query_entrypoint"], "rate_limit");
+        assert_eq!(
+            offer["checked_entrypoints"],
+            json!(["persistent", "rate_limit"])
+        );
     }
 }

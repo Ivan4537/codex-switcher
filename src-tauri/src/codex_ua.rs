@@ -213,7 +213,7 @@ fn parse_semver(s: &str) -> Option<String> {
     re.find(s).map(|m| m.as_str().to_string())
 }
 
-fn os_type() -> &'static str {
+pub(crate) fn os_type() -> &'static str {
     // 对齐 os_info::os_type() 的取值。
     if cfg!(target_os = "macos") {
         "Mac OS"
@@ -224,7 +224,7 @@ fn os_type() -> &'static str {
     }
 }
 
-fn os_version() -> String {
+pub(crate) fn os_version() -> String {
     static V: OnceLock<String> = OnceLock::new();
     V.get_or_init(|| detect_os_version().unwrap_or_else(|| "unknown".to_string()))
         .clone()
@@ -248,7 +248,7 @@ fn detect_os_version() -> Option<String> {
     None
 }
 
-fn arch() -> &'static str {
+pub(crate) fn arch() -> &'static str {
     // os_info 的命名：Apple Silicon = "arm64"（std 的 ARCH 是 "aarch64"）。
     match std::env::consts::ARCH {
         "aarch64" => "arm64",

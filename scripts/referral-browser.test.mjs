@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 const source = fs.readFileSync('src-tauri/src/referral_browser.js', 'utf8');
 
-function browser(identity, status = 200) {
+function browser(identity, status = 200, offers = [{ should_show: true, remaining_send_capacity: 3, grants: [] }]) {
     const calls = [];
     const elements = [];
     const document = {
@@ -19,7 +19,7 @@ function browser(identity, status = 200) {
             return { ok: calls.length === 1 || status === 200, status,
                 headers: new Map([['content-type', 'application/json']]),
                 json: async () => calls.length === 1 ? identity
-                    : { should_show: true, remaining_send_capacity: 3, grants: [] },
+                    : offers[Math.min(calls.length - 2, offers.length - 1)],
             };
         },
     };
@@ -33,12 +33,38 @@ test('browser route only GETs and binds callback to selected identity and nonce'
     await fixture.button.onclick();
     assert.equal(fixture.calls.length, 2);
     assert.ok(fixture.calls.every(call => call.options.method === 'GET' && call.options.redirect === 'error'));
+    assert.ok(fixture.calls.every(call => call.options.headers.originator === 'Codex Desktop' && call.options.headers['OAI-Product-Sku'] === 'CODEX'));
     const result = new URL(fixture.location.href);
     assert.equal(result.searchParams.get('nonce'), 'test-nonce');
     const data = JSON.parse(result.searchParams.get('data'));
     assert.equal(data.offer.remaining_send_capacity, 3);
     assert.equal(data.account_id, 'A');
     assert.ok(!result.toString().includes('test-token'));
+});
+
+test('hidden persistent entrypoint is not treated as the rate-limit result', async () => {
+    const fixture = browser({ account_id: 'A', user_id: 'U' }, 200, [
+        { should_show: false, remaining_send_capacity: 0 },
+        { should_show: true, remaining_send_capacity: 2, grants: [] },
+    ]);
+    await fixture.button.onclick();
+    assert.equal(fixture.calls.length, 3);
+    assert.ok(fixture.calls.every(call => call.options.method === 'GET'));
+    assert.ok(fixture.calls[1].url.includes('entrypoint=persistent'));
+    assert.ok(fixture.calls[2].url.includes('entrypoint=rate_limit'));
+    const data = JSON.parse(new URL(fixture.location.href).searchParams.get('data'));
+    assert.equal(data.offer.should_show, true);
+    assert.equal(data.offer.remaining_send_capacity, 2);
+    assert.equal(data.query_entrypoint, 'rate_limit');
+    assert.deepEqual(data.checked_entrypoints, ['persistent', 'rate_limit']);
+});
+
+test('both hidden entrypoints remain hidden and do not authorize sending', async () => {
+    const fixture = browser({ account_id: 'A', user_id: 'U' }, 200, [{ should_show: false }]);
+    await fixture.button.onclick();
+    const data = JSON.parse(new URL(fixture.location.href).searchParams.get('data'));
+    assert.equal(data.offer.should_show, false);
+    assert.deepEqual(data.checked_entrypoints, ['persistent', 'rate_limit']);
 });
 
 test('wrong account or a challenged query returns no confirmed result', async () => {

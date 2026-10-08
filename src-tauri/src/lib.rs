@@ -22,6 +22,7 @@ mod proxy;
 mod quota_snapshot;
 mod referrals;
 mod referral_browser;
+mod desktop_ua;
 mod refresh_lock;
 pub mod relay_catalog;
 pub mod relay_translate;

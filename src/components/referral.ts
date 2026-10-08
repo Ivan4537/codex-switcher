@@ -6,6 +6,8 @@ export interface ReferralGrant {
 
 export interface ReferralOffer {
     query_source?: 'verified_browser';
+    query_entrypoint?: 'persistent' | 'rate_limit';
+    checked_entrypoints?: ('persistent' | 'rate_limit')[];
     should_show?: boolean;
     offer_id?: string | null;
     grants?: ReferralGrant[];

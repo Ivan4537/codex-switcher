@@ -106,7 +106,7 @@ export function ReferralQuotaCard({ accountId, program }: { accountId: string; p
                         {currentOffer.query_source === 'verified_browser' && <button className="referral-quota-retry" onClick={() => void invoke('open_official_referral_client').catch(err => setError(String(err)))}>在官方 Desktop 查看</button>}
                     </>
                 ) : (
-                    <p className="referral-quota-muted">接口明确返回：当前账号未开放此邀请活动。</p>
+                    <p className="referral-quota-muted">本次查询未显示邀请入口，不代表邀请次数为零。{currentOffer?.query_source === 'verified_browser' ? ` 已查询 ${(currentOffer.checked_entrypoints ?? ['persistent']).join(' / ')}。` : ' 请在浏览器会话中补查官方邀请入口。'}</p>
                 )
             )}
         </section>

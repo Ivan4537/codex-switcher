@@ -126,7 +126,7 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                         <div className={`referral-offer-summary${offer.should_show ? '' : ' unavailable'}`}>
                             <div className="referral-reward-block">
                                 <span className="referral-stat-label">每位符合条件的邀请奖励</span>
-                                <strong>{offer.should_show ? formatReferralReward(offer) : '当前账号暂未开放'}</strong>
+                                <strong>{offer.should_show ? formatReferralReward(offer) : '本次查询未显示邀请入口'}</strong>
                             </div>
                             {offer.should_show && <div className="referral-capacity-block">
                                 <span className="referral-stat-label">可发送邮箱</span>
@@ -139,7 +139,11 @@ export function ReferralInviteModal({ id, name, program: initialProgram, onClose
                             <span>奖励名额 {offer.remaining_reward_capacity ?? '未提供'}</span>
                         </div>}
                         <p className="referral-note">
-                            {offer.query_source === 'verified_browser' && '浏览器已确认资格和次数；发送邀请请在官方 Desktop 完成。'}
+                            {offer.query_source === 'verified_browser' && (offer.should_show
+                                ? `浏览器已确认 ${offer.query_entrypoint ?? 'persistent'} 入口；发送邀请请在官方 Desktop 完成。`
+                                : `浏览器已查询 ${(offer.checked_entrypoints ?? ['persistent']).join(' / ')}，接口未展示入口；不代表邀请次数为零。`)}
+                            {!offer.should_show && offer.query_source !== 'verified_browser' && '这里只查询了 persistent 入口，不能据此判断其他官方入口没有活动。请在浏览器会话中补查。'}
+                            {!offer.should_show && offer.remaining_send_capacity != null && ` 本次接口返回剩余发送次数：${offer.remaining_send_capacity}。`}
                             {!knownReward
                                 ? '接口未提供实际奖励金额，不能根据活动编号推断为 500 或 1000。'
                                 : '活动奖励不等于当前余额；对方接受邀请并完成官方要求后才会到账。'}

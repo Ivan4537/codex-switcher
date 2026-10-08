@@ -109,8 +109,11 @@ fn request(
             format!("https://chatgpt.com/backend-api/referrals/invite{path}"),
         )
         .bearer_auth(token)
-        .header("User-Agent", crate::codex_ua::codex_user_agent())
-        .header("originator", crate::codex_ua::CODEX_ORIGINATOR)
+        .header("User-Agent", crate::desktop_ua::user_agent())
+        // Referrals belong to the Desktop product, not the CLI surface. The
+        // same OAuth token returns should_show=false with codex_cli_rs.
+        .header("originator", "Codex Desktop")
+        .header("OAI-Product-Sku", "CODEX")
         .header("Accept", "application/json")
         .timeout(Duration::from_secs(30));
     if let Some(id) = account_id {
@@ -247,6 +250,17 @@ pub async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invitation_requests_use_desktop_product_context() {
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            let req = request("test-token", Some("test-account"), method, "/eligibility")
+                .build()
+                .unwrap();
+            assert_eq!(req.headers()["originator"], "Codex Desktop");
+            assert_eq!(req.headers()["OAI-Product-Sku"], "CODEX");
+            assert_eq!(req.headers()["ChatGPT-Account-Id"], "test-account");
+        }
+    }
     fn offer() -> Value {
         json!({"should_show":true,"offer_id":"credits_1000","remaining_send_capacity":5,"remaining_reward_capacity":2,"grants":[{"recipient":"referrer","grant_type":"personal_credits","amount":1000}]})
     }
