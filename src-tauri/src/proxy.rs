@@ -306,6 +306,38 @@ struct ProxyState {
     listen_port: u16,
 }
 
+/// Release serialization even when the client disconnects and drops the request
+/// future while it is awaiting remote arbitration or an upstream response.
+struct SwitchGuard<'a>(&'a AtomicBool);
+
+impl<'a> SwitchGuard<'a> {
+    fn try_acquire(switching: &'a AtomicBool) -> Option<Self> {
+        switching
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| Self(switching))
+    }
+
+    async fn wait_until_idle(switching: &AtomicBool, timeout: std::time::Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            while switching.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+impl Drop for SwitchGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+const QUOTA_SWITCH_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+const REMOTE_SWITCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+
 static ACTIVE_PROXY_STATE: std::sync::LazyLock<Mutex<Option<std::sync::Weak<ProxyState>>>> =
     std::sync::LazyLock::new(|| Mutex::new(None));
 
@@ -473,6 +505,17 @@ pub fn start(
             *active = Some(Arc::downgrade(&state));
         }
         request_antigravity_prewarm(None);
+        // Desktop can disable its composer after a usage poll, before it sends
+        // another inference request. Recovery must not depend on a new 429.
+        let weak_state = Arc::downgrade(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                let Some(state) = weak_state.upgrade() else { break; };
+                recover_exhausted_current(&state).await;
+            }
+        });
 
         loop {
             let (stream, peer_addr) = match listener.accept().await {
@@ -2209,15 +2252,170 @@ fn switch_credits_to_subscription(state: &ProxyState) -> bool {
         crate::subscription_candidate_before_credits(&store, id)
     });
     let Some(target) = target else { return false; };
-    if state.switching.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+    let Some(_switch_guard) = SwitchGuard::try_acquire(&state.switching) else {
         return false;
-    }
+    };
     let switched = do_switch(state, &target, SwitchReason::QuotaThreshold).is_ok();
-    state.switching.store(false, Ordering::SeqCst);
     if switched {
         println!("[Proxy] 套餐额度优先：切离仅剩积分的账号");
     }
     switched
+}
+
+fn exhausted_current_candidate(store: &AccountStore) -> Option<(String, String)> {
+    let current_id = store.current.as_ref()?;
+    let current = store.accounts.get(current_id)?;
+    if !current.is_openai_account() {
+        return None;
+    }
+    let quota = current.cached_quota.as_ref()?;
+    if quota.has_usable_quota()
+        || quota
+            .luna_reserve
+            .as_ref()
+            .is_some_and(|reserve| reserve.is_available_for(&reserve.normal_model_slug))
+    {
+        return None;
+    }
+    crate::score_candidate_accounts(store)
+        .into_iter()
+        .find_map(|(id, _, _)| {
+            let account = store.accounts.get(&id)?;
+            (account.is_openai_account()
+                && AccountStore::extract_access_token(&account.auth_json).is_some()
+                && account
+                    .cached_quota
+                    .as_ref()
+                    .is_some_and(|q| q.has_usable_quota()))
+            .then(|| (current_id.clone(), id))
+        })
+}
+
+async fn recover_exhausted_current(state: &ProxyState) {
+    let Some(_guard) = SwitchGuard::try_acquire(&state.switching) else {
+        return;
+    };
+    let recovery = state.store.lock().ok().and_then(|store| {
+        let (from, target) = exhausted_current_candidate(&store)?;
+        Some((
+            from,
+            target,
+            store.settings.remote_mode == "client" && !store.settings.client_owns_current,
+            store.settings.remote_server_url.clone(),
+            store.settings.remote_server_url_fallback.clone(),
+            store.settings.remote_shared_secret.clone(),
+        ))
+    });
+    let Some((from, target, remote_arbitrates, primary, fallback, secret)) = recovery else {
+        return;
+    };
+    println!("[Proxy] 后台额度恢复：当前账号已耗尽，主动切号（无需新请求）");
+    if remote_arbitrates && !secret.is_empty() {
+        let remote = async {
+            let base = crate::remote_client::resolve_base_url(&primary, &fallback).await?;
+            let outcome =
+                request_remote_quota_switch(&base, &secret, Some(&from), "quota_exhausted_watch")
+                    .await?;
+            let id = outcome
+                .current
+                .filter(|id| id != &from && !outcome.exhausted)
+                .ok_or_else(|| "remote returned no replacement".to_string())?;
+            tokio::time::timeout(
+                REMOTE_SWITCH_TIMEOUT,
+                adopt_remote_current(state, &base, &secret, &id),
+            )
+            .await
+            .map_err(|_| "remote account adoption timed out".to_string())??;
+            state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
+            let _ = state
+                .app_handle
+                .emit("proxy-account-switched", &outcome.name.unwrap_or_default());
+            Ok::<(), String>(())
+        }
+        .await;
+        if remote.is_ok() {
+            return;
+        }
+        eprintln!("[Proxy] 后台远端切号失败，尝试本地恢复: {:?}", remote.err());
+    }
+    // A manual/remote switch may have won during arbitration. Never overwrite it.
+    let still_exhausted = state
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| exhausted_current_candidate(&store))
+        .is_some_and(|(current, candidate)| current == from && candidate == target);
+    if still_exhausted {
+        if let Err(error) = do_switch(state, &target, SwitchReason::QuotaThreshold) {
+            eprintln!("[Proxy] 后台额度恢复失败: {}", error);
+        }
+    }
+}
+
+async fn recover_socket_quota_limit(state: &ProxyState, socket_id: Option<&str>) {
+    let Some(failed_id) = socket_id else {
+        eprintln!("[Proxy] WS 限额没有可验证的账号归属，不标记当前账号");
+        return;
+    };
+    mark_account_quota_depleted(state, failed_id);
+    let Some(_guard) = SwitchGuard::try_acquire(&state.switching) else {
+        return;
+    };
+    let routing = state.store.lock().ok().and_then(|store| {
+        (store.current.as_deref() == Some(failed_id)).then(|| {
+            (
+                store.settings.remote_mode == "client" && !store.settings.client_owns_current,
+                store.settings.remote_server_url.clone(),
+                store.settings.remote_server_url_fallback.clone(),
+                store.settings.remote_shared_secret.clone(),
+            )
+        })
+    });
+    let Some((remote_arbitrates, primary, fallback, secret)) = routing else {
+        return;
+    };
+    if remote_arbitrates && !secret.is_empty() {
+        let remote = async {
+            let base = crate::remote_client::resolve_base_url(&primary, &fallback).await?;
+            let outcome =
+                request_remote_quota_switch(&base, &secret, Some(failed_id), "http_429_ws").await?;
+            let id = outcome
+                .current
+                .filter(|id| id != failed_id && !outcome.exhausted)
+                .ok_or_else(|| "remote has no replacement".to_string())?;
+            tokio::time::timeout(
+                REMOTE_SWITCH_TIMEOUT,
+                adopt_remote_current(state, &base, &secret, &id),
+            )
+            .await
+            .map_err(|_| "remote WS adoption timed out".to_string())??;
+            state.stats.auto_switches.fetch_add(1, Ordering::Relaxed);
+            let _ = state
+                .app_handle
+                .emit("proxy-account-switched", &outcome.name.unwrap_or_default());
+            println!("[Proxy] WS 限额已由 Server 切号并同步本机");
+            Ok::<(), String>(())
+        }
+        .await;
+        if remote.is_ok() {
+            return;
+        }
+        eprintln!("[Proxy] WS 远端切号失败，尝试本地兜底: {:?}", remote.err());
+    }
+    let unchanged = state
+        .store
+        .lock()
+        .ok()
+        .is_some_and(|store| store.current.as_deref() == Some(failed_id));
+    if unchanged {
+        if let PickResult::Found { id, .. } = pick_next_account(state) {
+            let _ = do_switch(state, &id, SwitchReason::WebSocketRateLimit);
+        }
+    }
+}
+
+fn socket_may_publish_quota(current: Option<&str>, socket: Option<&str>) -> bool {
+    current.is_some() && current == socket
 }
 
 fn pick_next_account(state: &ProxyState) -> PickResult {
@@ -2441,21 +2639,17 @@ fn current_has_luna_reserve(state: &ProxyState) -> bool {
         .is_some_and(|reserve| reserve.is_available_for("gpt-5.6-luna"))
 }
 
-fn mark_current_luna_reserve_depleted(state: &ProxyState) {
+fn mark_account_luna_reserve_depleted(state: &ProxyState, account_id: &str) {
     if let Ok(mut store) = state.store.lock() {
-        if let Some(current_id) = store.current.clone() {
-            if let Some(account) = store.accounts.get_mut(&current_id) {
-                if let Some(reserve) = account
-                    .cached_quota
-                    .as_mut()
-                    .and_then(|quota| quota.luna_reserve.as_mut())
-                {
-                    reserve.limit_reached = true;
-                    reserve.used_percent = 100;
-                    let _ = store.save();
-                    println!("[Proxy] 当前账号 Luna Reserve 已由上游确认耗尽");
-                }
-            }
+        if let Some(reserve) = store
+            .accounts
+            .get_mut(account_id)
+            .and_then(|account| account.cached_quota.as_mut())
+            .and_then(|quota| quota.luna_reserve.as_mut())
+        {
+            reserve.limit_reached = true;
+            reserve.used_percent = 100;
+            let _ = store.save();
         }
     }
 }
@@ -2652,8 +2846,8 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     // 读取通知设置
     let notify_enabled = store.settings.notify_on_switch;
     let inject_enabled = store.settings.inject_switch_message;
-    // solo 模式下把 current 同步给 Server（非阻塞）
-    let solo_push = if store.settings.remote_mode == "solo"
+    // 本机自动切号同步给 Server，避免快速同步又采纳远端旧 current。
+    let solo_push = if store.settings.remote_mode == "client"
         && !store.settings.remote_shared_secret.is_empty()
     {
         Some((
@@ -2661,6 +2855,7 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
             store.settings.remote_server_url_fallback.clone(),
             store.settings.remote_shared_secret.clone(),
             new_id.to_string(),
+            !store.settings.client_owns_current,
         ))
     } else {
         None
@@ -2673,13 +2868,13 @@ fn do_switch(state: &ProxyState, new_id: &str, reason: SwitchReason) -> Result<(
     spawn_quota_snapshot(from_fetch_info, "switch_out");
     spawn_quota_snapshot(to_fetch_info, "switch_in");
 
-    if let Some((primary, fallback, secret, nid)) = solo_push {
+    if let Some((primary, fallback, secret, nid, apply_to_disk)) = solo_push {
         tauri::async_runtime::spawn(async move {
             match crate::remote_client::resolve_base_url(&primary, &fallback).await {
                 Ok(base) => {
-                    // solo 模式：apply_to_disk=false，Server 仅归档 current 不写盘
+                    // Client 跟随远端时同步其 disk；自主 current 模式仅归档。
                     if let Err(e) =
-                        crate::remote_client::push_solo_switch(&base, &secret, &nid, false).await
+                        crate::remote_client::push_solo_switch(&base, &secret, &nid, apply_to_disk).await
                     {
                         eprintln!("[Solo] 自动切号后 push Server 失败: {}", e);
                     }
@@ -3136,6 +3331,7 @@ async fn handle_request(
             "status": "ok",
             "total_requests": total,
             "auto_switches": switches,
+            "switch_in_progress": state.switching.load(Ordering::SeqCst),
         });
         return Ok(Response::builder()
             .status(200)
@@ -4006,7 +4202,11 @@ async fn handle_request(
         if !is_capacity {
             println!("[Proxy] HTTP 429 (per-account 限额)，标记额度耗尽并切号...");
         }
-        mark_current_quota_depleted(&state);
+        if let Some(account_id) = used_account_id.as_deref() {
+            mark_account_quota_depleted(&state, account_id);
+        } else {
+            mark_current_quota_depleted(&state);
+        }
         if let Some(resp) = dispatch_quota_switch_retry(
             &state,
             &method,
@@ -4190,15 +4390,11 @@ async fn handle_request(
             if should_preemptive_switch(&state_clone)
                 && !current_has_luna_reserve_for_request(&state_clone, &body_bytes)
             {
-                if state_clone
-                    .switching
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
+                if let Some(_switch_guard) = SwitchGuard::try_acquire(&state_clone.switching)
                 {
                     if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
                         let _ = do_switch(&state_clone, &id, SwitchReason::QuotaThreshold);
                     }
-                    state_clone.switching.store(false, Ordering::SeqCst);
                 }
             }
         });
@@ -4219,20 +4415,30 @@ async fn handle_request(
         if should_preemptive_switch(&state_clone)
             && !current_has_luna_reserve_for_request(&state_clone, &body_bytes)
         {
-            if state_clone
-                .switching
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
+            if let Some(_switch_guard) = SwitchGuard::try_acquire(&state_clone.switching)
             {
                 if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
                     let _ = do_switch(&state_clone, &id, SwitchReason::QuotaThreshold);
                 }
-                state_clone.switching.store(false, Ordering::SeqCst);
             }
         }
     });
 
     Ok(resp)
+}
+
+async fn request_remote_quota_switch(
+    base: &str,
+    secret: &str,
+    from: Option<&str>,
+    reason: &str,
+) -> Result<crate::remote_client::RemoteSwitchOutcome, String> {
+    tokio::time::timeout(
+        REMOTE_SWITCH_TIMEOUT,
+        crate::remote_client::request_switch(base, secret, from, reason),
+    )
+    .await
+    .map_err(|_| "remote quota switch timed out".to_string())?
 }
 
 /// client 模式：让 Server 仲裁切号，然后用新 token 重试
@@ -4245,7 +4451,7 @@ async fn try_remote_switch_and_retry(
     session_key: Option<&str>,
     reason_label: &str,
 ) -> Option<Response<ProxyBody>> {
-    let (current_id, primary, fallback, secret) = {
+    let (mut current_id, primary, fallback, secret) = {
         let store = state.store.lock().ok()?;
         (
             store.current.clone(),
@@ -4267,7 +4473,7 @@ async fn try_remote_switch_and_retry(
     };
 
     for attempt in 0..MAX_429_RETRIES {
-        let outcome = match crate::remote_client::request_switch(
+        let outcome = match request_remote_quota_switch(
             &base,
             &secret,
             current_id.as_deref(),
@@ -4293,7 +4499,7 @@ async fn try_remote_switch_and_retry(
             eprintln!("[Proxy] 采纳 Server current 失败: {}", e);
             return None;
         }
-        invalidate_remote_token_cache();
+        current_id = Some(new_current.clone());
         let (new_token, _) = match get_current_token(state).await {
             Ok(t) => t,
             Err(e) => {
@@ -4393,6 +4599,9 @@ async fn adopt_remote_current(
     if let Some(auth) = auth_to_write {
         // anchor-guarded：跳过 anchor 不匹配的写盘
         write_codex_auth_respecting_anchor(state, new_id, &auth);
+    }
+    if let Some(token) = AccountStore::extract_access_token(&t.auth_json) {
+        remote_token_cache_put(new_id, &token, token.starts_with("eyJ"));
     }
     // 同 do_switch 的理由：client 模式被 Server 推过来的切号也不该牵连无关 bridge。
     // 真正"该断的"那条 bridge 在 limit 检测里自己会送 Close。
@@ -4683,6 +4892,21 @@ fn headers_without_turn_state(base: &reqwest::header::HeaderMap) -> reqwest::hea
 /// 优先检查 current，兼容普通切号；再按 token 精确查找，兼容 session affinity / hard route
 /// 在不修改 current 的情况下临时使用其它账号。只有 ChatGPT OAuth 账号才返回 account id，
 /// OpenAI API key / Relay 必须移除客户端遗留的 `chatgpt-account-id`。
+fn account_store_id_for_token(state: &ProxyState, token: &str) -> Option<String> {
+    let store = state.store.lock().ok()?;
+    account_id_for_token_in_store(&store, token)
+}
+
+fn account_id_for_token_in_store(store: &AccountStore, token: &str) -> Option<String> {
+    store
+        .accounts
+        .values()
+        .find(|account| {
+            AccountStore::extract_access_token(&account.auth_json).as_deref() == Some(token)
+        })
+        .map(|account| account.id.clone())
+}
+
 fn chatgpt_account_id_for_token(state: &ProxyState, token: &str) -> Option<String> {
     let store = state.store.lock().ok()?;
 
@@ -5041,7 +5265,7 @@ async fn call_remote_switch_silently(state: &ProxyState) -> Result<(), String> {
     let base = crate::remote_client::resolve_base_url(&primary, &fallback)
         .await
         .map_err(|e| format!("resolve_base_url: {}", e))?;
-    let outcome = crate::remote_client::request_switch(
+    let outcome = request_remote_quota_switch(
         &base,
         &secret,
         cur_id.as_deref(),
@@ -5490,12 +5714,11 @@ async fn dispatch_quota_switch_retry(
     session_key: Option<&str>,
     reason: SwitchReason,
 ) -> Option<Response<ProxyBody>> {
-    let remote_mode = state
+    let remote_arbitrates = state
         .store
         .lock()
-        .map(|s| s.settings.remote_mode.clone())
-        .unwrap_or_default();
-
+        .map(|s| s.settings.remote_mode == "client" && !s.settings.client_owns_current)
+        .unwrap_or(false);
     let remote_label = match &reason {
         SwitchReason::Http429 => "http_429",
         SwitchReason::InStreamRateLimit => "in_stream_rate_limit",
@@ -5503,32 +5726,25 @@ async fn dispatch_quota_switch_retry(
         _ => "http_429",
     };
 
-    if remote_mode == "client" {
-        if state
-            .switching
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            let remote_result = try_remote_switch_and_retry(
-                state,
-                method,
-                upstream_url,
-                base_headers,
-                body,
-                session_key,
-                remote_label,
-            )
-            .await;
-            if remote_result.is_some() {
-                state.switching.store(false, Ordering::SeqCst);
-                return remote_result;
+    for _ in 0..2 {
+        if let Some(_switch_guard) = SwitchGuard::try_acquire(&state.switching) {
+            if remote_arbitrates {
+                if let Some(resp) = try_remote_switch_and_retry(
+                    state,
+                    method,
+                    upstream_url,
+                    base_headers,
+                    body,
+                    session_key,
+                    remote_label,
+                )
+                .await
+                {
+                    return Some(resp);
+                }
+                println!("[Proxy] client 远端切号无果，降级本地 try_switch_and_retry 兜底");
             }
-            // 远端切号失败（Server 不可达 / Server 报"全部耗尽" / token 失效等）。
-            // 已经有"原请求 Server 不可达时 fall through 本地直发"的逻辑，限额后的切号
-            // 重试也应该走同样的本地兜底，否则用户就会看到原始 429 body（"hit your usage
-            // limit"）而代理静默不切。
-            println!("[Proxy] client 远端切号无果，降级本地 try_switch_and_retry 兜底");
-            let local_result = try_switch_and_retry(
+            return try_switch_and_retry(
                 state,
                 method,
                 upstream_url,
@@ -5538,65 +5754,51 @@ async fn dispatch_quota_switch_retry(
                 reason,
             )
             .await;
-            state.switching.store(false, Ordering::SeqCst);
-            return local_result;
         }
-        // 别人正在切号 → 短等后用最新 current 直接重发
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Ok((new_token, _)) = get_current_token(state).await {
-            if let BootstrappedForward::Ok(resp) = forward_and_bootstrap(
+
+        // A concurrent switch may include network arbitration and SSE bootstrap;
+        // 500 ms is too short and leaked a fatal usage_limit_reached to Desktop.
+        println!("[Proxy] 等待并发切号完成后重试限额请求");
+        if !SwitchGuard::wait_until_idle(&state.switching, QUOTA_SWITCH_WAIT).await {
+            return Some(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "account switch still in progress; retry shortly",
+            ));
+        }
+        if let Ok((token, _)) = get_current_token(state).await {
+            let current = state.store.lock().ok().and_then(|s| s.current.clone());
+            let retry_body = current
+                .as_deref()
+                .map(|id| rewrite_prompt_cache_key(body, id))
+                .unwrap_or_else(|| body.clone());
+            let retry_headers = headers_without_turn_state(base_headers);
+            match forward_and_bootstrap(
                 state,
                 method,
                 upstream_url,
-                base_headers,
-                body,
-                &new_token,
+                &retry_headers,
+                &retry_body,
+                &token,
                 session_key,
             )
             .await
             {
-                return Some(resp);
+                BootstrappedForward::Ok(resp) => return Some(resp),
+                BootstrappedForward::RateLimit => {
+                    if let Some(id) = current.as_deref() {
+                        mark_account_quota_depleted(state, id);
+                    }
+                }
+                _ => {}
             }
         }
-        return None;
+        // The winner's replacement also failed: take the released guard and
+        // perform a real switch, instead of returning the original quota error.
     }
-
-    // 本地模式
-    if state
-        .switching
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_ok()
-    {
-        let result = try_switch_and_retry(
-            state,
-            method,
-            upstream_url,
-            base_headers,
-            body,
-            session_key,
-            reason,
-        )
-        .await;
-        state.switching.store(false, Ordering::SeqCst);
-        return result;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    if let Ok((new_token, _)) = get_current_token(state).await {
-        if let BootstrappedForward::Ok(resp) = forward_and_bootstrap(
-            state,
-            method,
-            upstream_url,
-            base_headers,
-            body,
-            &new_token,
-            session_key,
-        )
-        .await
-        {
-            return Some(resp);
-        }
-    }
-    None
+    Some(error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "account switch contention; retry shortly",
+    ))
 }
 
 /// 用于把"该请求归属于哪个 session、用了哪个号"信息传到响应解析末尾，
@@ -5809,63 +6011,68 @@ async fn acquire_replacement_upstream(
     body: &Bytes,
     reason: SwitchReason,
 ) -> Option<ByteStream> {
-    let remote_mode = state
+    let remote_arbitrates = state
         .store
         .lock()
-        .map(|s| s.settings.remote_mode.clone())
-        .unwrap_or_default();
+        .map(|s| s.settings.remote_mode == "client" && !s.settings.client_owns_current)
+        .unwrap_or(false);
 
-    if remote_mode == "client" {
-        let (current_id, primary, fallback, secret) = {
-            let s = state.store.lock().ok()?;
-            (
-                s.current.clone(),
-                s.settings.remote_server_url.clone(),
-                s.settings.remote_server_url_fallback.clone(),
-                s.settings.remote_shared_secret.clone(),
-            )
-        };
-        if secret.is_empty() {
-            return None;
-        }
-        let base = crate::remote_client::resolve_base_url(&primary, &fallback)
-            .await
-            .ok()?;
-        let label = match &reason {
-            SwitchReason::InStreamRateLimit => "in_stream_rate_limit",
-            SwitchReason::InStreamBanned => "in_stream_banned",
-            _ => "http_429",
-        };
-        let outcome =
-            crate::remote_client::request_switch(&base, &secret, current_id.as_deref(), label)
+    if remote_arbitrates {
+        let remote_stream = async {
+            let (current_id, primary, fallback, secret) = {
+                let s = state.store.lock().ok()?;
+                (
+                    s.current.clone(),
+                    s.settings.remote_server_url.clone(),
+                    s.settings.remote_server_url_fallback.clone(),
+                    s.settings.remote_shared_secret.clone(),
+                )
+            };
+            if secret.is_empty() {
+                return None;
+            }
+            let base = crate::remote_client::resolve_base_url(&primary, &fallback)
                 .await
                 .ok()?;
-        if outcome.exhausted {
-            return None;
-        }
-        let new_current = outcome.current?;
-        adopt_remote_current(state, &base, &secret, &new_current)
+            let label = match &reason {
+                SwitchReason::InStreamRateLimit => "in_stream_rate_limit",
+                SwitchReason::InStreamBanned => "in_stream_banned",
+                _ => "http_429",
+            };
+            let outcome = request_remote_quota_switch(&base, &secret, current_id.as_deref(), label)
+                .await
+                .ok()?;
+            if outcome.exhausted {
+                return None;
+            }
+            let new_current = outcome.current?;
+            adopt_remote_current(state, &base, &secret, &new_current)
+                .await
+                .ok()?;
+            let (new_token, _) = get_current_token(state).await.ok()?;
+            // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
+            let body_for_new = rewrite_prompt_cache_key(body, &new_current);
+            let headers_no_ts = headers_without_turn_state(base_headers);
+            let resp = forward_with_token(
+                state,
+                method,
+                upstream_url,
+                &headers_no_ts,
+                &body_for_new,
+                &new_token,
+            )
             .await
             .ok()?;
-        invalidate_remote_token_cache();
-        let (new_token, _) = get_current_token(state).await.ok()?;
-        // 切号到新账号 → prompt_cache_key 拼 account_id + 剥 x-codex-turn-state
-        let body_for_new = rewrite_prompt_cache_key(body, &new_current);
-        let headers_no_ts = headers_without_turn_state(base_headers);
-        let resp = forward_with_token(
-            state,
-            method,
-            upstream_url,
-            &headers_no_ts,
-            &body_for_new,
-            &new_token,
-        )
-        .await
-        .ok()?;
-        if resp.status() != reqwest::StatusCode::OK {
-            return None;
+            if resp.status() != reqwest::StatusCode::OK {
+                return None;
+            }
+            Some(resp.bytes_stream().boxed())
         }
-        return Some(resp.bytes_stream().boxed());
+        .await;
+        if remote_stream.is_some() {
+            return remote_stream;
+        }
+        println!("[Proxy] SSE 远端切号无果，降级本地选号兜底");
     }
 
     // 本地模式
@@ -6621,6 +6828,8 @@ async fn handle_websocket(
         }
     }
 
+    let mut socket_account_id = account_store_id_for_token(&state, &token);
+
     let path = req
         .uri()
         .path_and_query()
@@ -6792,6 +7001,7 @@ async fn handle_websocket(
                         );
                         if let Ok(c) = tokio_tungstenite::connect_async(r).await {
                             println!("[Proxy] 容量满同号 retry 第 {} 次成功", attempt);
+                            socket_account_id = account_store_id_for_token(&state, &cur_token);
                             same_account_retry = Some(c);
                             break;
                         }
@@ -6810,7 +7020,9 @@ async fn handle_websocket(
             } else if is_per_account_limit {
                 // ───── 2) 明确 per-account 限额 → 切号（唯一允许切号的情况）─────
                 println!("[Proxy] WebSocket 握手命中 per-account 限额，标记当前号耗尽并切号...");
-                mark_current_quota_depleted(&state);
+                if let Some(id) = socket_account_id.as_deref() {
+                    mark_account_quota_depleted(&state, id);
+                }
 
                 // 最多试 3 个号。注意：只有候选号自己也回 per-account 限额才标它耗尽 + 继续换；
                 // 候选号若是网络层 / 其它非额度错误 → 是网络坏了不是号坏了，立刻停止，绝不标耗尽
@@ -6832,6 +7044,7 @@ async fn handle_websocket(
                     match tokio_tungstenite::connect_async(r).await {
                         Ok(c) => {
                             println!("[Proxy] WebSocket 切号重连成功（{}）", id);
+                            socket_account_id = Some(id.clone());
                             retry_conn = Some(c);
                             break;
                         }
@@ -6842,7 +7055,7 @@ async fn handle_websocket(
                             if e2_is_limit {
                                 // 这个号也确实满了 → 标耗尽，换下一个
                                 println!("[Proxy] 切到 {} 仍 per-account 限额，标耗尽换下一个", id);
-                                mark_current_quota_depleted(&state);
+                                mark_account_quota_depleted(&state, &id);
                                 continue;
                             }
                             // 网络层 / 其它非额度错误 → 不是号的问题，停止切号、不污染号池
@@ -6874,7 +7087,10 @@ async fn handle_websocket(
                         let new_chatgpt = new_tok.starts_with("eyJ");
                         match make_upstream_req(&new_tok, new_chatgpt, relay_base_url.as_deref()) {
                             Some(r) => match tokio_tungstenite::connect_async(r).await {
-                                Ok(c) => c,
+                                Ok(c) => {
+                                    socket_account_id = account_store_id_for_token(&state, &new_tok);
+                                    c
+                                },
                                 Err(e2) => {
                                     return Ok(error_response(
                                         StatusCode::BAD_GATEWAY,
@@ -6923,11 +7139,7 @@ async fn handle_websocket(
         .get("x-codex-turn-state")
         .and_then(|value| value.to_str().ok())
     {
-        let ws_account_id = state
-            .store
-            .lock()
-            .ok()
-            .and_then(|store| store.current.clone());
+        let ws_account_id = socket_account_id.clone();
         let ws_model = routing_hint_model(req.headers());
         let ws_session = crate::session_affinity::extract_session_key(&[], req.headers());
         state.stats.turn_state.observe(
@@ -7013,7 +7225,7 @@ async fn handle_websocket(
                     println!("[Proxy] 已注入切号通知到 WebSocket");
                 }
 
-                bridge_websockets(client_ws, upstream_ws, disconnect, state).await;
+                bridge_websockets(client_ws, upstream_ws, disconnect, state, socket_account_id).await;
                 println!("[Proxy] WebSocket 连接已关闭");
             }
             Err(e) => eprintln!("[Proxy] WebSocket upgrade 失败: {}", e),
@@ -7346,6 +7558,7 @@ async fn bridge_websockets<S1, S2>(
     upstream: S2,
     disconnect: Arc<tokio::sync::Notify>,
     state: Arc<ProxyState>,
+    socket_account_id: Option<String>,
 ) where
     S1: futures_util::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
         + futures_util::Sink<tungstenite::Message, Error = tungstenite::Error>
@@ -7390,7 +7603,6 @@ async fn bridge_websockets<S1, S2>(
         return;
     }
 
-    let socket_account_id = state.store.lock().ok().and_then(|s| s.current.clone());
     let (mut client_write, mut client_read) = client.split();
     let (mut upstream_write, mut upstream_read) = upstream.split();
 
@@ -7564,6 +7776,15 @@ async fn bridge_websockets<S1, S2>(
                             has_function_call = true;
                         }
                     }
+                    if matches!(&msg, tungstenite::Message::Text(t) if
+                        serde_json::from_str::<serde_json::Value>(t).ok()
+                            .and_then(|v| v.get("type").and_then(|v| v.as_str()).map(str::to_string))
+                            .as_deref() == Some("codex.rate_limits")) {
+                        let publish = state_clone.store.lock().ok().is_some_and(|store| {
+                            socket_may_publish_quota(store.current.as_deref(), socket_account_id.as_deref())
+                        });
+                        if !publish { continue; }
+                    }
                     // 检测错误：**不要把错误消息转发给 client**（之前的 bug），
                     // 区分两种 case：
                     //   - per-account 限额：本号已耗尽 → 切号 + 关 WS
@@ -7595,20 +7816,14 @@ async fn bridge_websockets<S1, S2>(
                             // usage_limit_reached is authoritative: mark Reserve depleted and
                             // switch so Codex reconnects with a usable account instead of
                             // leaving its send button disabled on a dead WebSocket.
-                            mark_current_luna_reserve_depleted(&state_clone);
-                            mark_current_quota_depleted(&state_clone);
-                            if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                                let _ =
-                                    do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
+                            if let Some(id) = socket_account_id.as_deref() {
+                                mark_account_luna_reserve_depleted(&state_clone, id);
                             }
+                            recover_socket_quota_limit(&state_clone, socket_account_id.as_deref()).await;
                             println!("[Proxy] WebSocket Luna Reserve 已耗尽，切号并关闭此 WS");
                         } else {
                             println!("[Proxy] WebSocket 单号限额，静默切号 + 关 WS");
-                            mark_current_quota_depleted(&state_clone);
-                            if let PickResult::Found { id, .. } = pick_next_account(&state_clone) {
-                                let _ =
-                                    do_switch(&state_clone, &id, SwitchReason::WebSocketRateLimit);
-                            }
+                            recover_socket_quota_limit(&state_clone, socket_account_id.as_deref()).await;
                         }
                         // 关 client 侧 WS，让 Codex App 干净断开 + 自动重连
                         let _ = client_write.send(tungstenite::Message::Close(None)).await;
@@ -7636,12 +7851,7 @@ async fn bridge_websockets<S1, S2>(
                             if let Some(mut usage) =
                                 crate::token_tracker::extract_usage_from_sse(wrapped.as_bytes(), "")
                             {
-                                let cur_id = state_clone
-                                    .store
-                                    .lock()
-                                    .ok()
-                                    .and_then(|s| s.current.clone())
-                                    .unwrap_or_default();
+                                let cur_id = socket_account_id.clone().unwrap_or_default();
                                 let cache_pct = if usage.input_tokens > 0 {
                                     (usage.cached_input_tokens as f64 / usage.input_tokens as f64)
                                         * 100.0
@@ -8989,6 +9199,87 @@ fn error_response(status: StatusCode, message: &str) -> Response<ProxyBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn websocket_identity_is_bound_to_handshake_token_even_after_current_changes() {
+        let mut store = AccountStore::default();
+        let old = store.add_account("old".into(), serde_json::json!({"tokens":{"access_token":"eyJ.old"}}), None);
+        let new = store.add_account("new".into(), serde_json::json!({"tokens":{"access_token":"eyJ.new"}}), None);
+        store.current = Some(new.id.clone());
+        assert_eq!(account_id_for_token_in_store(&store, "eyJ.old"), Some(old.id.clone()));
+        assert!(!socket_may_publish_quota(store.current.as_deref(), Some(&old.id)));
+        assert!(socket_may_publish_quota(store.current.as_deref(), Some(&new.id)));
+        assert!(account_id_for_token_in_store(&store, "unknown").is_none());
+        assert!(!socket_may_publish_quota(None, None));
+    }
+
+    #[test]
+    fn exhausted_desktop_recovers_without_an_inference_request_or_threshold() {
+        let mut store = AccountStore::default();
+        let mut ids = Vec::new();
+        for (name, primary, weekly) in [("empty-plus", 1.0, 0.0), ("ready-team", 47.0, 100.0)] {
+            let account = store.add_account(name.into(), serde_json::json!({
+                "tokens": {"access_token": format!("eyJ.test.{name}")}
+            }), None);
+            let id = account.id.clone();
+            let entry = store.accounts.get_mut(&id).unwrap();
+            entry.kind = AccountKind::ChatgptOauth;
+            entry.cached_quota = Some(serde_json::from_value(serde_json::json!({
+                "five_hour_left": primary, "weekly_left": weekly,
+                "five_hour_reset": "later", "weekly_reset": "later",
+                "five_hour_reset_at": null, "weekly_reset_at": null,
+                "plan_type": if name == "empty-plus" { "plus" } else { "team" },
+                "updated_at": Utc::now()
+            })).unwrap());
+            ids.push(id);
+        }
+        store.current = Some(ids[0].clone());
+        store.settings.proxy_threshold_5h = 0;
+        store.settings.proxy_threshold_weekly = 0;
+        assert_eq!(exhausted_current_candidate(&store), Some((ids[0].clone(), ids[1].clone())));
+        // Never fabricate availability from an unknown cache or steal a usable account.
+        store.accounts.get_mut(&ids[1]).unwrap().cached_quota = None;
+        assert!(exhausted_current_candidate(&store).is_none());
+        store.accounts.get_mut(&ids[0]).unwrap().cached_quota.as_mut().unwrap().weekly_left = 50.0;
+        assert!(exhausted_current_candidate(&store).is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_quota_switch_releases_serialization() {
+        let switching = Arc::new(AtomicBool::new(false));
+        let task_flag = switching.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = SwitchGuard::try_acquire(&task_flag).unwrap();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        assert!(SwitchGuard::try_acquire(&switching).is_none());
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let replacement = SwitchGuard::try_acquire(&switching);
+        assert!(replacement.is_some(), "disconnect must not strand all later switches");
+        drop(replacement);
+        assert!(!switching.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn concurrent_quota_request_waits_for_switch_not_just_500ms() {
+        let switching = Arc::new(AtomicBool::new(false));
+        let owner_flag = switching.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let owner = tokio::spawn(async move {
+            let _guard = SwitchGuard::try_acquire(&owner_flag).unwrap();
+            started.send(()).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(650)).await;
+        });
+        ready.await.unwrap();
+        assert!(!SwitchGuard::wait_until_idle(&switching, std::time::Duration::from_millis(5)).await);
+        assert!(SwitchGuard::wait_until_idle(&switching, std::time::Duration::from_secs(3)).await);
+        owner.await.unwrap();
+        assert!(SwitchGuard::try_acquire(&switching).is_some());
+    }
 
     #[test]
     fn compaction_path_detection_ignores_query_parameters() {
