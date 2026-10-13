@@ -4,6 +4,14 @@ import { createTranslator } from './translator';
 // Earlier UI translations adapted from InventiveSpark/codex-switcher (MIT).
 // Additional translations cover the current UI and preserve source placeholders.
 export const englishReplacements: readonly (readonly [string, string])[] = [
+  ["自动拉取 Server Skills", "Automatically pull Server Skills"],
+  ["启动时及每 5 分钟同步到当前用户目录；自动过滤平台依赖，保留本机 Skills 和修改。", "Sync to the current user’s home at startup and every 5 minutes. Filter platform dependencies and preserve local Skills and edits."],
+  ["拉取 Skills", "Pull Skills"],
+  ["，未变", ", unchanged"],
+  ["，跳过", ", skipped"],
+  ["，本机冲突", ", local conflicts"],
+  ["立即拉取 Skills", "Pull Skills now"],
+
   ['本次查询未显示邀请入口', 'This query did not show an invitation entrypoint'],
   ['浏览器已确认', 'Browser verified'],
   ['入口；发送邀请请在官方 Desktop 完成。', ' entrypoint; send invitations in official Desktop.'],

@@ -1057,6 +1057,33 @@ pub fn list_local_skill_dirs() -> Vec<String> {
     list_skill_dirs_at(&ssot_dir())
 }
 
+/// Refresh only entries owned by the pull operation, including nested packaged skills.
+pub fn index_pulled_skills(report: &crate::skills_pull::Report) -> Result<(), String> {
+    let mut data = SkillStore::load();
+    data.skills.retain(|s| !report.retired.contains(&s.directory));
+    for directory in report.updated.iter().chain(&report.unchanged) {
+        let (name, description) = parse_skill_md(&ssot_dir().join(directory));
+        if let Some(existing) = data.skills.iter_mut().find(|s| &s.directory == directory) {
+            existing.name = name.unwrap_or_else(|| directory.clone());
+            existing.description = description.unwrap_or_default();
+        } else {
+            data.skills.push(InstalledSkill {
+                id: format!("remote:{}", directory),
+                name: name.unwrap_or_else(|| directory.clone()),
+                description: description.unwrap_or_default(),
+                directory: directory.clone(),
+                source: "local".into(),
+                repo_owner: None,
+                repo_name: None,
+                apps: SkillApps::default(),
+                installed_at: Utc::now(),
+            });
+        }
+    }
+    SkillStore::save(&data)?;
+    sync_antigravity_if_enabled()
+}
+
 /// 把 SSOT 下的一个 skill 目录打成 zip，返回字节流。过滤缓存文件。
 pub fn zip_skill_dir(name: &str) -> Result<Vec<u8>, String> {
     use std::io::{Cursor, Read, Write};

@@ -8,6 +8,17 @@
 
 **中文** | [English](#english) | [Русский](#русский)
 
+## 2026-10-13：跨机器 Skills 自动同步
+
+此前 Client 只能将 Skills 上传到 Server，无法自动拉取；直接复制 Mac Skills 到 Linux 时，写死的用户目录和 macOS 命令也可能导致无法使用。现在新增通用的 Server → Client 自动同步，复用已配置的 Server 地址、回退地址和共享密钥，不绑定特定用户名或机器。
+
+- 在 Client 设置中开启「自动拉取 Server Skills」，启动时及每 5 分钟拉取，也可点击「立即拉取 Skills」。默认关闭；Server 与 Client 均需更新到支持此功能的版本。
+- Skills 存放于当前用户的 `~/.codex-switcher/skills`。副本中的 Server Home 引用按 Client Home 适配；Linux 按本机 PATH 解析 Homebrew 可执行文件路径，并过滤 macOS 专用内容和缺少本机依赖的 Skills。
+- 支持 `compatibility.json` 声明平台与所需命令。保留本机 `.system`、自有 Skills 和本机修改；更新或移除受管理副本时先归档，连接失败时保留上次内容。
+- 同步副本不再通过「同步到 Server」反向上传，避免把 Linux 路径覆盖回 Mac 原文件；拉取结果同步更新 Skills 列表。
+
+验证：Mac/Linux 构建通过，7 项同步测试与 6 项国际化测试通过；实机验证自动定时更新、不同用户 Home 适配、本机内容保留、远端移除归档及 Codex CLI 读取。具体配置见下方「多机器共享账号池」。
+
 > **v0.7.19 新增：阶跃星辰 StepFun Step Plan 支持。**
 >
 > 在「添加中转 → CODING PLAN → 阶跃星辰 Step Plan」中填入 Step API Key，即可接入 `https://api.stepfun.com/step_plan/v1`。Switcher 会直接读取官方 `/models` 返回的原生 `step-*` 模型，模型列表中可直接选择，不需要 GPT 别名映射。
@@ -690,6 +701,12 @@ Codex Switcher 内置 Skills 管理页面，用于把一组可复用 Agent 能�
 2. 在其他机器设置为 `client` 或 `solo`。
 3. 填入 server URL 和 shared secret。
 4. 客户端从 server 获取账号状态、Token 和切号结果。
+
+Client 可在设置中开启「自动拉取 Server Skills」：启动时及每 5 分钟使用现有 Server 地址、回退地址和共享密钥拉取 `/skills/bundle`，也可手动立即拉取。此选项默认关闭，需要 Server 和 Client 都支持该接口。
+
+Skills 保存到当前用户的 `~/.codex-switcher/skills`，无需配置用户名或固定机器地址。同步副本内引用的 Server Home 路径会适配为 Client Home；Server 原文件不修改。Linux 会排除依赖 macOS 命令、应用或缺失本机项目/Skills 的内容，Homebrew 可执行文件路径按本机 PATH 解析。可在 Skill 根目录添加 `compatibility.json` 明确声明，例如 `{"platforms":["linux","macos"],"requires":["python3","git"]}`。声明不能使不兼容命令自动变得兼容；平台检查仍然保守执行。
+
+本机 `.system`、未受同步管理的 Skills 以及本机修改均保留，不会被远端覆盖。拉取副本不会通过「同步到 Server」回传，避免把 Client 路径反写到 Server。原先受管理的未修改副本在更新或远端移除时备份到 `~/.codex-switcher/skills-pull-backups`。网络或旧 Server 接口失败时保留上次副本；状态记录在 `skills-pull-report.json`。客户端现有 Skills 黑名单也用于拉取排除。导出跳过符号链接、缓存和检测到内嵌凭据的 Skills。
 
 ### 用手机锚保护 Codex.app 手机远程连接（v0.7.0+）
 

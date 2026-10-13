@@ -133,6 +133,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub skills_sync_blacklist: Vec<String>,
 
+    /// Opt-in Server → Client Skills mirror; directory and platform are resolved locally.
+    #[serde(default)]
+    pub skills_auto_pull: bool,
+
     /// solo 模式：心跳时自动把本机 current 对齐到 Server 的 current
     /// 关掉后允许两端 current 不一致；但手工一键同号仍可用。
     #[serde(default = "default_true")]
@@ -292,6 +296,7 @@ impl Default for AppSettings {
             current_antigravity_account_id: None,
             current_relay_accounts: HashMap::new(),
             skills_sync_blacklist: Vec::new(),
+            skills_auto_pull: false,
             solo_auto_sync_current: true,
             proxy_bootstrap_byte_cap: default_bootstrap_byte_cap(),
             proxy_bootstrap_time_cap_ms: default_bootstrap_time_cap_ms(),

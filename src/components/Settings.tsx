@@ -35,6 +35,7 @@ interface AppSettings {
     relay_auto_switch_in: boolean;
     client_direct_upstream: boolean;
     client_owns_current: boolean;
+    skills_auto_pull: boolean;
 }
 
 interface RemoteHealth {
@@ -84,6 +85,7 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
         relay_auto_switch_in: false,
         client_direct_upstream: false,
         client_owns_current: false,
+        skills_auto_pull: false,
     });
     const [saving, setSaving] = useState(false);
     const [repairing, setRepairing] = useState(false);
@@ -674,6 +676,21 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                                     同步所有 token
                                 </button>
                             </div>
+                        </div>
+
+                        <div className="setting-item sub-item">
+                            <div className="setting-info">
+                                <span className="setting-label">自动拉取 Server Skills</span>
+                                <span className="setting-desc">启动时及每 5 分钟同步到当前用户目录；自动过滤平台依赖，保留本机 Skills 和修改。</span>
+                            </div>
+                            <label className="toggle">
+                                <input type="checkbox" checked={settings.skills_auto_pull} onChange={e => updateField('skills_auto_pull', e.target.checked)} />
+                                <span className="toggle-slider"></span>
+                            </label>
+                            <button className="action-button" disabled={remoteBusy} onClick={() => withRemote('拉取 Skills', async () => {
+                                const r = await invoke<{ updated: string[]; unchanged: string[]; skipped: Record<string, string>; conflicts: string[] }>('remote_pull_skills');
+                                return `更新 ${r.updated.length}，未变 ${r.unchanged.length}，跳过 ${Object.keys(r.skipped).length}，本机冲突 ${r.conflicts.length}`;
+                            })}>立即拉取 Skills</button>
                         </div>
 
                         {settings.remote_mode === 'solo' && (

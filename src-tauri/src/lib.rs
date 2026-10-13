@@ -34,6 +34,7 @@ mod session_affinity;
 mod session_import;
 mod session_routes;
 mod skills;
+mod skills_pull;
 mod sse_watchdog;
 mod switch_log;
 mod token_tracker;
@@ -5996,6 +5997,8 @@ struct SkillSyncReport {
 #[tauri::command]
 async fn remote_sync_skills(state: State<'_, AppState>) -> Result<SkillSyncReport, String> {
     let (url, secret) = client_settings_snapshot(&state).await?;
+    let home = dirs::home_dir().ok_or("Cannot resolve current user's home directory")?;
+    let mirrored = skills_pull::managed_roots(&home)?;
     let blacklist: std::collections::HashSet<String> = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         store
@@ -6010,7 +6013,7 @@ async fn remote_sync_skills(state: State<'_, AppState>) -> Result<SkillSyncRepor
     let mut skipped = Vec::new();
     let mut errors: Vec<(String, String)> = Vec::new();
     for name in names {
-        if blacklist.contains(&name) {
+        if blacklist.contains(&name) || mirrored.contains(&name) {
             skipped.push(name);
             continue;
         }
@@ -6037,6 +6040,50 @@ async fn remote_sync_skills(state: State<'_, AppState>) -> Result<SkillSyncRepor
         skipped,
         errors,
     })
+}
+
+static SKILLS_PULL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn pull_skills_once(store: &std::sync::Arc<std::sync::Mutex<AccountStore>>) -> Result<skills_pull::Report, String> {
+    let _guard = SKILLS_PULL_LOCK.lock().await;
+    let (mode, primary, fallback, secret, blacklist) = {
+        let s = store.lock().map_err(|e| e.to_string())?;
+        (s.settings.remote_mode.clone(), s.settings.remote_server_url.clone(), s.settings.remote_server_url_fallback.clone(), s.settings.remote_shared_secret.clone(), s.settings.skills_sync_blacklist.clone())
+    };
+    if mode != "client" || secret.is_empty() { return Err("Configure Client mode and Server authentication first".into()); }
+    let base = remote_client::resolve_base_url(&primary, &fallback).await?;
+    let bundle = remote_client::download_skills(&base, &secret).await?;
+    // Keep the primary/fallback pair as one identity: switching network routes is not a new source.
+    let source = format!("{}|{}", primary.trim_end_matches('/'), fallback.trim_end_matches('/'));
+    tokio::task::spawn_blocking(move || {
+        let home = dirs::home_dir().ok_or("Cannot resolve current user's home directory")?;
+        let report = skills_pull::apply(bundle, &home.join(".codex-switcher/skills"), &home, std::env::consts::OS, &source, &blacklist)?;
+        skills::index_pulled_skills(&report)?;
+        Ok(report)
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn remote_pull_skills(state: State<'_, AppState>) -> Result<skills_pull::Report, String> {
+    pull_skills_once(&state.store).await
+}
+
+fn start_skills_pull(store: std::sync::Arc<std::sync::Mutex<AccountStore>>) {
+    tauri::async_runtime::spawn(async move {
+        let mut next = std::time::Instant::now();
+        loop {
+            let enabled = store.lock().map(|s| s.settings.remote_mode == "client" && s.settings.skills_auto_pull).unwrap_or(false);
+            if enabled && std::time::Instant::now() >= next {
+                match pull_skills_once(&store).await {
+                    Ok(r) => println!("[SkillsPull] updated={} unchanged={} skipped={} conflicts={}", r.updated.len(), r.unchanged.len(), r.skipped.len(), r.conflicts.len()),
+                    Err(e) => eprintln!("[SkillsPull] {} (retaining existing skills)", e),
+                }
+                next = std::time::Instant::now() + std::time::Duration::from_secs(300);
+            }
+            if !enabled { next = std::time::Instant::now(); }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
 }
 
 /// 按当前 settings 启动/重启 server 端 HTTP API（便于 UI 切换模式后不用重启 App）
@@ -6392,6 +6439,7 @@ pub fn run() {
             if let Err(e) = skills::init_ssot() {
                 eprintln!("[Skills] SSOT 初始化失败: {}", e);
             }
+            start_skills_pull(state.store.clone());
             {
                 let mut data = skills::SkillStore::load();
                 let count = skills::SkillStore::scan_existing(&mut data);
@@ -6524,6 +6572,7 @@ pub fn run() {
             remote_fetch_token,
             remote_refresh_account_quota,
             remote_sync_skills,
+            remote_pull_skills,
             remote_restart_server,
             ];
             move |invoke: tauri::ipc::Invoke| {

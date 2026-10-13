@@ -688,6 +688,20 @@ pub async fn list_remote_skills(base_url: &str, secret: &str) -> Result<Vec<Stri
 }
 
 /// 将一个 skill zip 推送到 Server
+pub async fn download_skills(base_url: &str, secret: &str) -> Result<crate::skills_pull::Bundle, String> {
+    let mut response = Client::builder().no_proxy().timeout(Duration::from_secs(90)).build().map_err(|e| e.to_string())?
+        .get(format!("{}/skills/bundle", trim_url(base_url))).header(AUTH_HEADER, secret)
+        .send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() { return Err(format!("Server Skills export returned {} (upgrade Server if unsupported)", response.status())); }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        if bytes.len() + chunk.len() > 48 * 1024 * 1024 { return Err("Skills export too large".into()); }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+/// 将一个 skill zip 推送到 Server
 pub async fn upload_skill(
     base_url: &str,
     secret: &str,

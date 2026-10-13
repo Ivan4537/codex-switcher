@@ -161,6 +161,18 @@ async fn route(
         return handle_list_skills();
     }
 
+    if path == "/skills/bundle" && method == Method::GET {
+        let bundle = tokio::task::spawn_blocking(|| {
+            let home = dirs::home_dir().ok_or("Cannot resolve Server home")?;
+            crate::skills_pull::export(&home.join(".codex-switcher/skills"), &home)
+        }).await;
+        return match bundle {
+            Ok(Ok(value)) => json_resp(StatusCode::OK, serde_json::to_value(value).unwrap_or_default()),
+            Ok(Err(e)) => err_resp(e),
+            Err(e) => err_resp(e.to_string()),
+        };
+    }
+
     if path == "/skills/upload" && method == Method::POST {
         let query = req.uri().query().unwrap_or("").to_string();
         return handle_upload_skill(req, &query).await;
