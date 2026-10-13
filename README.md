@@ -726,6 +726,10 @@ Skills 保存到当前用户的 `~/.codex-switcher/skills`，无需配置用户�
 
 ## 安装
 
+Linux 从源码构建生产二进制时，请使用 `bash scripts/build-linux-production.sh`（需已安装构建依赖），或通过 Tauri CLI 构建安装包。直接运行 `cargo build --release` 不会自动启用 `tauri/custom-protocol`，可能使窗口仍连接开发地址 `localhost:1420`，出现连接被拒绝。生产构建必须内嵌 `dist` 前端资源，不能依赖 Vite 开发服务。
+
+Linux 配置无人登录也运行的用户服务时，可用 `scripts/linux-client-service.sh` 在桌面显示与 Xvfb 之间选择；桌面启动器和登录自启应通过 `scripts/linux-client-open.sh` 启动同一个服务，避免后台代理与桌面窗口重复运行。这两个辅助脚本要求 systemd 用户服务、Xvfb 和 `xdpyinfo`；普通桌面安装不需要配置此服务。
+
 从 [Releases](https://github.com/xtftbwvfp/codex-switcher/releases/latest) 下载最新版本。
 
 ### 下载哪个文件
