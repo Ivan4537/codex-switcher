@@ -737,7 +737,7 @@ async fn resolve_token_with_affinity(
                 .map(|a| {
                     // 基础健康：没被打三个 flag
                     let basic_ok = !a.is_banned && !a.is_logged_out && !a.is_token_invalid
-                        && !(store.settings.protect_session_anchor && a.is_session_anchor);
+                        && !crate::should_defer_session_anchor(&store, id);
                     if !basic_ok {
                         return false;
                     }
@@ -9236,6 +9236,10 @@ mod tests {
         store.current = Some(ids[0].clone());
         store.settings.proxy_threshold_5h = 0;
         store.settings.proxy_threshold_weekly = 0;
+        assert_eq!(exhausted_current_candidate(&store), Some((ids[0].clone(), ids[1].clone())));
+        // The only healthy replacement may be the protected phone anchor.
+        store.accounts.get_mut(&ids[1]).unwrap().is_session_anchor = true;
+        assert!(store.settings.protect_session_anchor);
         assert_eq!(exhausted_current_candidate(&store), Some((ids[0].clone(), ids[1].clone())));
         // Never fabricate availability from an unknown cache or steal a usable account.
         store.accounts.get_mut(&ids[1]).unwrap().cached_quota = None;

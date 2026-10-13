@@ -76,7 +76,7 @@ pub struct AppSettings {
     /// 热切 = 只改 store.current + 失效代理缓存，不写 ~/.codex/auth.json
     #[serde(default = "default_switch_mode")]
     pub switch_mode: String,
-    /// Keep the phone anchor out of automatic account selection and soft affinity.
+    /// Prefer other eligible accounts; use the phone anchor as the last automatic fallback.
     #[serde(default = "default_true")]
     pub protect_session_anchor: bool,
 

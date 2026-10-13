@@ -745,8 +745,8 @@ export function Settings({ accounts = [], onSetSessionAnchor }: SettingsProps = 
                     <h3><Smartphone size={16} /> Codex.app 手机锚绑定</h3>
                     <div className="setting-item">
                         <div className="setting-info">
-                            <span className="setting-label">保护手机锚额度</span>
-                            <span className="setting-desc">默认不把手机锚用于自动选号和自动会话绑定。手动选择和明确指定的会话路由仍按你的设置执行。</span>
+                            <span className="setting-label">手机锚最后使用</span>
+                            <span className="setting-desc">自动切号先用其他可用账号，全部不可用时再用手机锚。手动选择和明确指定的会话路由仍按你的设置执行，磁盘登录身份保持手机锚。</span>
                         </div>
                         <label className="toggle"><input type="checkbox" checked={settings.protect_session_anchor ?? true}
                             onChange={event => updateField('protect_session_anchor', event.target.checked)} /><span className="toggle-slider" /></label>

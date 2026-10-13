@@ -3157,6 +3157,10 @@ pub fn start_quota_refresh(
 }
 
 pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f64)> {
+    rank_candidate_accounts(store, false)
+}
+
+fn rank_candidate_accounts(store: &AccountStore, include_current: bool) -> Vec<(String, String, f64)> {
     let current_id = store.current.as_deref().unwrap_or("");
     let allow_free = store.settings.allow_auto_switch_to_free;
     let allow_switch_in_relay = store.settings.relay_auto_switch_in;
@@ -3165,8 +3169,7 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
     let mut scored: Vec<(String, String, f64)> = Vec::new();
 
     for account in store.accounts.values() {
-        if account.id == current_id
-            || (store.settings.protect_session_anchor && account.is_session_anchor)
+        if (!include_current && account.id == current_id)
             || account.is_banned
             || account.is_token_invalid
             || account.is_logged_out
@@ -3249,9 +3252,22 @@ pub fn score_candidate_accounts(store: &AccountStore) -> Vec<(String, String, f6
         scored.push((account.id.clone(), account.name.clone(), score));
     }
 
-    // 按得分从高到低排序
-    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    // Phone anchors are a separate last-resort tier, even behind credit-only accounts.
+    // A score penalty alone could lose to the full-Plus bonus or future scoring changes.
+    let anchor_tier = |id: &str| store.settings.protect_session_anchor
+        && store.accounts.get(id).is_some_and(|a| a.is_session_anchor);
+    scored.sort_by(|a, b| anchor_tier(&a.0).cmp(&anchor_tier(&b.0))
+        .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+        .then_with(|| a.0.cmp(&b.0)));
     scored
+}
+
+/// Affinity and credit preference must admit the anchor when no other eligible account remains.
+pub(crate) fn should_defer_session_anchor(store: &AccountStore, id: &str) -> bool {
+    store.settings.protect_session_anchor
+        && store.accounts.get(id).is_some_and(|a| a.is_session_anchor)
+        && rank_candidate_accounts(store, true).iter()
+            .any(|(candidate, _, _)| store.accounts.get(candidate).is_some_and(|a| !a.is_session_anchor))
 }
 
 /// 积分仅兜底：当前账号只剩积分时，优先选择已确认仍有套餐额度的健康账号。
@@ -3271,7 +3287,7 @@ pub(crate) fn subscription_candidate_before_credits(
     let eligible = |id: &str| {
         store.accounts.get(id).is_some_and(|a| {
             id != account_id
-                && !(store.settings.protect_session_anchor && a.is_session_anchor)
+                && !should_defer_session_anchor(store, id)
                 && a.is_openai_account()
                 && !a.is_banned && !a.is_token_invalid && !a.is_logged_out
                 && AccountStore::extract_access_token(&a.auth_json).is_some()
@@ -6985,21 +7001,67 @@ mod tests {
         assert!(!should_follow_server_current("solo", false, false));
     }
 
-    #[test]
-    fn protected_anchor_is_excluded_and_can_be_opted_in() {
+    fn anchor_priority_fixture() -> AccountStore {
         let mut store = AccountStore::default();
-        let mut anchor = test_account("anchor", "anchor", "rt-anchor");
-        anchor.id = "anchor".into();
-        anchor.kind = account::AccountKind::ChatgptOauth;
-        anchor.is_session_anchor = true;
-        store.accounts.insert(anchor.id.clone(), anchor);
-        let mut worker = test_account("worker", "worker", "rt-worker");
-        worker.id = "worker".into();
-        store.accounts.insert(worker.id.clone(), worker);
+        for (id, remaining, anchor) in [("empty", 0.0, false), ("worker", 0.1, false), ("anchor", 100.0, true)] {
+            let mut a = test_account(id, id, "rt-test");
+            a.id = id.into();
+            a.kind = account::AccountKind::ChatgptOauth;
+            a.is_session_anchor = anchor;
+            a.cached_quota = Some(serde_json::from_value(serde_json::json!({
+                "five_hour_left": remaining, "weekly_left": 100.0,
+                "five_hour_reset": "later", "weekly_reset": "later",
+                "plan_type": if anchor { "pro" } else { "plus" }, "updated_at": Utc::now()
+            })).unwrap());
+            store.accounts.insert(a.id.clone(), a);
+        }
+        store.current = Some("empty".into());
+        store
+    }
+
+    #[test]
+    fn protected_anchor_is_last_resort_and_can_be_opted_into_normal_ranking() {
+        let mut store = anchor_priority_fixture();
         assert!(store.settings.protect_session_anchor);
-        assert_eq!(score_candidate_accounts(&store).iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["worker"]);
+        assert_eq!(score_candidate_accounts(&store).iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["worker", "anchor"]);
+        // The full-Plus score bonus cannot make an anchor leap over a usable worker.
+        store.accounts.get_mut("anchor").unwrap().cached_quota.as_mut().unwrap().plan_type = "plus".into();
+        assert_eq!(score_candidate_accounts(&store)[0].0, "worker");
         store.settings.protect_session_anchor = false;
-        assert_eq!(score_candidate_accounts(&store).len(), 2);
+        assert_eq!(score_candidate_accounts(&store)[0].0, "anchor");
+    }
+
+    #[test]
+    fn protected_anchor_remains_available_when_other_accounts_are_exhausted() {
+        let mut store = anchor_priority_fixture();
+        store.accounts.get_mut("worker").unwrap().cached_quota.as_mut().unwrap().five_hour_left = 0.0;
+        assert_eq!(score_candidate_accounts(&store).iter().map(|row| row.0.as_str()).collect::<Vec<_>>(), vec!["anchor"]);
+        assert!(!should_defer_session_anchor(&store, "anchor"));
+        store.accounts.get_mut("anchor").unwrap().is_logged_out = true;
+        assert!(score_candidate_accounts(&store).is_empty());
+    }
+
+    #[test]
+    fn anchor_affinity_deferral_counts_the_healthy_current_worker() {
+        let mut store = anchor_priority_fixture();
+        store.current = Some("worker".into());
+        assert!(should_defer_session_anchor(&store, "anchor"));
+        store.accounts.get_mut("worker").unwrap().cached_quota.as_mut().unwrap().five_hour_left = 0.0;
+        assert!(!should_defer_session_anchor(&store, "anchor"));
+    }
+
+    #[test]
+    fn non_anchor_credits_are_used_before_anchor_subscription_quota() {
+        let mut store = anchor_priority_fixture();
+        store.current = Some("worker".into());
+        let q = store.accounts.get_mut("worker").unwrap().cached_quota.as_mut().unwrap();
+        q.five_hour_left = 0.0;
+        q.has_credits = true;
+        q.credits_balance = Some(10.0);
+        assert!(should_defer_session_anchor(&store, "anchor"));
+        assert!(subscription_candidate_before_credits(&store, "worker").is_none());
+        store.current = Some("empty".into());
+        assert_eq!(score_candidate_accounts(&store)[0].0, "worker");
     }
 
     #[test]
